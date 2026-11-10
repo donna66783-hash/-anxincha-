@@ -104,4 +104,23 @@ describe('analyzeContent', () => {
     expect(result.category).toBe('社群導流／個資蒐集')
     expect(result.findings.some((finding) => finding.title.includes('本機語意 AI'))).toBe(true)
   })
+
+  it('normalizes spaced screenshot OCR and flags off-platform marketplace contact', () => {
+    const result = analyzeContent('Marketplace 上 架 商 品 有 賣 出 了 嗎 我 家 人 要 買 麻 煩 您 加 下 她 的 LINE : z9617', undefined, undefined, { source: 'image', ocrConfidence: 81, ocrPasses: 2 })
+    expect(result.level).toBe('high')
+    expect(result.category).toBe('假買家／社群導流')
+    expect(result.findings.some((finding) => finding.title.includes('離開原平台'))).toBe(true)
+  })
+
+  it('uses an official brand-domain mismatch as high-risk evidence', () => {
+    const result = analyzeContent('vip-tcat.whds.shop 宅 急 便 填 寫 收 件 資 料 姓 名 電 話', undefined, undefined, { source: 'image', ocrConfidence: 71, ocrPasses: 2 })
+    expect(result.level).toBe('high')
+    expect(result.findings.some((finding) => finding.source?.name.includes('黑貓'))).toBe(true)
+  })
+
+  it('flags a fake recurring-order notice that diverts to LINE support', () => {
+    const result = analyzeContent('訂 單 續 訂 時 間 後 續 將 週 期 性 扣 款 若 您 並 未 設 定 此 筆 交 易 聯 絡 客 服 LINE : am545gce', undefined, undefined, { source: 'image', ocrConfidence: 81, ocrPasses: 2 })
+    expect(result.level).toBe('high')
+    expect(result.category).toBe('假客服／假訂單')
+  })
 })

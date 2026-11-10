@@ -34,6 +34,8 @@ export interface DatabaseSearchResult {
   searchedDomains: string[]
   version?: string
   recordCount?: number
+  generatedAt?: string
+  sources?: ThreatSource[]
   error?: string
 }
 
@@ -80,11 +82,11 @@ function buildMatch(
 
 export function searchRecords(
   content: string,
-  database: Pick<ThreatDatabase, 'version' | 'recordCount' | 'categories' | 'sources' | 'records'>,
+  database: Pick<ThreatDatabase, 'version' | 'recordCount' | 'categories' | 'sources' | 'records'> & Partial<Pick<ThreatDatabase, 'generatedAt'>>,
 ): DatabaseSearchResult {
   const searchedDomains = extractDomains(content)
   if (!searchedDomains.length) {
-    return { status: 'no-domain', matches: [], searchedDomains, version: database.version, recordCount: database.recordCount }
+    return { status: 'no-domain', matches: [], searchedDomains, version: database.version, recordCount: database.recordCount, generatedAt: database.generatedAt, sources: database.sources }
   }
 
   const index = new Map(database.records.map((record) => [record[0], record]))
@@ -102,6 +104,8 @@ export function searchRecords(
     searchedDomains,
     version: database.version,
     recordCount: database.recordCount,
+    generatedAt: database.generatedAt,
+    sources: database.sources,
   }
 }
 

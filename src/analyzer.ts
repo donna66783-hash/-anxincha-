@@ -1,6 +1,7 @@
 import type { CommunitySearchResult } from './community-db'
 import type { DatabaseSearchResult } from './threat-db'
 import type { SemanticSearchResult } from './semantic-analyzer'
+import { normalizeForMatching } from './text-normalizer'
 
 export type RiskLevel = 'low' | 'medium' | 'high'
 
@@ -8,6 +9,7 @@ export interface Finding {
   title: string
   detail: string
   weight: number
+  source?: { name: string; url: string }
 }
 
 export interface AnalysisResult {
@@ -20,11 +22,13 @@ export interface AnalysisResult {
   database: DatabaseSearchResult
   community: CommunitySearchResult
   semantic: SemanticSearchResult
+  context: AnalysisContext
 }
 
 export interface AnalysisContext {
   source?: 'text' | 'image' | 'file'
   ocrConfidence?: number
+  ocrPasses?: number
 }
 
 interface Rule {
@@ -87,12 +91,28 @@ const rules: Rule[] = [
     category: '遠端控制詐騙',
   },
   {
-    pattern: /加LINE|加賴|私訊.{0,4}客服|聯絡專員/i,
+    pattern: /加.{0,10}LINE|加賴|LINE\s*(?:ID|[:：])\s*[a-z0-9_-]{3,}|私訊.{0,4}客服|聯絡專員/i,
     title: '引導到私人通訊管道',
     detail: '詐騙廣告常將人帶往假客服或私人 LINE 帳號。',
     weight: 12,
     category: '社群導流',
     behavior: 'channel-switch',
+  },
+  {
+    pattern: /(?:Marketplace|買家|賣家|賣出|商品).{0,80}(?:加.{0,10}LINE|LINE\s*[:：])|(?:加.{0,10}LINE|LINE\s*[:：]).{0,80}(?:Marketplace|買家|賣家|賣出|商品)/i,
+    title: '交易被引導離開原平台',
+    detail: '買賣對話要求改用私人 LINE 聯絡，會失去原平台的交易紀錄與安全保護，是常見的假買家導流手法。',
+    weight: 34,
+    category: '假買家／社群導流',
+    behavior: 'commerce-off-platform',
+  },
+  {
+    pattern: /(?:未設定|不認識|沒有購買|非本人).{0,18}(?:交易|訂單|扣款)|(?:週期性|定期|自動).{0,8}(?:扣款|續訂)|訂單.{0,8}續訂/i,
+    title: '以陌生訂單或續訂扣款製造恐慌',
+    detail: '假訂單通知常聲稱已續訂或將定期扣款，再引導受害者聯絡假客服處理。',
+    weight: 30,
+    category: '假客服／假訂單',
+    behavior: 'unauthorized-charge',
   },
   {
     pattern: /(填|提供|留下|回覆).{0,12}(資料|姓名|電話|地址|生日|身分證|暱稱)|Google\s*(表單|問卷)|完成.{0,8}(申請|登記|認證)/i,
@@ -156,6 +176,14 @@ function inspectUrl(raw: string): Finding[] {
     if (/@/.test(match[0]) || /(login|verify|secure|account|bank).{0,10}(help|update|check)/i.test(url.hostname)) {
       findings.push({ title: '疑似仿冒登入網址', detail: '網址含有誘導登入或驗證的組合字樣，請改由官方 App 或自行輸入官網網址。', weight: 24 })
     }
+    if (/(黑貓|宅急便)/i.test(raw) && !/(^|\.)t-cat\.com\.tw$/i.test(url.hostname)) {
+      findings.push({
+        title: '網址與黑貓宅急便官方網域不符',
+        detail: `畫面提到黑貓宅急便，但辨識到的網域「${url.hostname}」不是官方公告的 t-cat.com.tw；官方也提醒不會透過不明網址要求輸入個資。`,
+        weight: 55,
+        source: { name: '黑貓宅急便反詐騙公告', url: 'https://www.t-cat.com.tw/Company/article_Detail.aspx?id=2539' },
+      })
+    }
     return findings
   } catch {
     return [{ title: '網址格式異常', detail: '這段網址無法正常解析，請勿直接開啟。', weight: 18 }]
@@ -173,7 +201,7 @@ export function analyzeContent(
   context: AnalysisContext = {},
   semantic: SemanticSearchResult = emptySemanticResult,
 ): AnalysisResult {
-  const text = content.trim()
+  const text = normalizeForMatching(content.trim())
   const matchedRules = rules.filter((rule) => rule.pattern.test(text))
   const findings: Finding[] = matchedRules.map(({ title, detail, weight }) => ({ title, detail, weight }))
   findings.push(...inspectUrl(text))
@@ -206,13 +234,13 @@ export function analyzeContent(
     findings.push({
       title: '截圖文字辨識可信度不足',
       detail: '部分文字可能沒有被正確讀取，因此不能把「未命中」視為安全，建議核對辨識文字或換清晰截圖。',
-      weight: 26,
+      weight: 35,
     })
   } else if (context.source === 'image' && findings.length === 0) {
     findings.push({
       title: '截圖未提供足夠資訊確認安全',
       detail: '圖片辨識可能遺漏關鍵內容；沒有網址或沒有命中案例，不代表對方可信。',
-      weight: 25,
+      weight: 35,
     })
   }
 
@@ -247,6 +275,7 @@ export function analyzeContent(
     database,
     community,
     semantic,
+    context,
     actions: level === 'high'
       ? ['不要匯款、點連結或提供驗證碼', '掛斷後自行查找官方電話重新聯絡', '撥打 165，或請可信任的家人一起確認']
       : level === 'medium'

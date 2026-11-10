@@ -34,6 +34,7 @@ export interface CommunitySearchResult {
   matches: CommunityMatch[]
   version?: string
   recordCount?: number
+  privacy?: string
   error?: string
 }
 
@@ -52,9 +53,10 @@ async function loadDatabase() {
 }
 
 export function matchCommunityRecords(content: string, database: CommunityDatabase): CommunitySearchResult {
+  const normalizedContent = normalizeForMatching(content)
   const matches = database.records.flatMap((record) => {
     const matchedSignals = record.signals
-      .filter((signal) => new RegExp(signal.pattern, 'i').test(content))
+      .filter((signal) => new RegExp(signal.pattern, 'i').test(normalizedContent))
       .map(({ title, detail }) => ({ title, detail }))
     if (matchedSignals.length < record.minSignals) return []
     return [{ id: record.id, source: record.source, observedAt: record.observedAt, category: record.category, matchedSignals }]
@@ -64,6 +66,7 @@ export function matchCommunityRecords(content: string, database: CommunityDataba
     matches,
     version: database.version,
     recordCount: database.recordCount,
+    privacy: database.privacy,
   }
 }
 
@@ -78,3 +81,5 @@ export async function searchCommunityDatabase(content: string): Promise<Communit
     }
   }
 }
+import { normalizeForMatching } from './text-normalizer'
+

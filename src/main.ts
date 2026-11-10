@@ -205,6 +205,7 @@ const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrl = ''
 let ocrWorkerPromise: Promise<Worker> | null = null
+let ocrEnglishWorkerPromise: Promise<Worker> | null = null
 let analysisContext: AnalysisContext = { source: 'text' }
 
 function updateCounter() {
@@ -244,6 +245,39 @@ async function getOcrWorker() {
   return ocrWorkerPromise
 }
 
+async function getEnglishOcrWorker() {
+  if (!ocrEnglishWorkerPromise) {
+    ocrEnglishWorkerPromise = import('tesseract.js').then(async ({ createWorker, PSM }) => {
+      const worker = await createWorker('eng', undefined, {
+        logger: ({ progress, status }) => updateOcrProgress(progress, status),
+      })
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
+      return worker
+    })
+  }
+  return ocrEnglishWorkerPromise
+}
+
+async function recognizeScreenshot(file: File) {
+  const worker = await getOcrWorker()
+  const full = await worker.recognize(file)
+  let urlText = ''
+  try {
+    ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
+    const bitmap = await createImageBitmap(file)
+    const englishWorker = await getEnglishOcrWorker()
+    const top = await englishWorker.recognize(file, {
+      rectangle: { left: 0, top: 0, width: bitmap.width, height: Math.max(1, Math.round(bitmap.height * 0.27)) },
+    })
+    bitmap.close()
+    urlText = top.data.text.trim()
+  } catch {
+    // The full-image OCR result remains usable if the URL-focused pass is unsupported.
+  }
+  const text = [full.data.text.trim(), urlText].filter(Boolean).join('\n')
+  return { text, confidence: full.data.confidence, passes: urlText ? 2 : 1 }
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>'\"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]!)
 }
@@ -257,17 +291,18 @@ const levelCopy: Record<RiskLevel, { label: string; icon: string }> = {
 function renderResult(result: AnalysisResult) {
   const copy = levelCopy[result.level]
   const findings = result.findings.length
-    ? result.findings.map((finding) => `<li><span>!</span><div><strong>${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.detail)}</p></div></li>`).join('')
+    ? result.findings.map((finding) => `<li><span>!</span><div><strong>${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.detail)}${finding.source ? ` <a href="${escapeHtml(finding.source.url)}" target="_blank" rel="noopener noreferrer">查看${escapeHtml(finding.source.name)} ↗</a>` : ''}</p></div></li>`).join('')
     : '<li class="no-finding"><span>✓</span><div><strong>未比對到常見高風險話術</strong><p>詐騙手法會持續變化，仍請確認對方身分與網址來源。</p></div></li>'
   const databasePanel = renderDatabaseResult(result.database)
   const communityPanel = renderCommunityResult(result.community)
   const semanticPanel = renderSemanticResult(result.semantic)
+  const evidencePanel = renderEvidencePanel(result)
 
   resultWrap.innerHTML = `
     <div class="result-card risk-${result.level}">
       <div class="result-summary">
         <div class="result-icon">${copy.icon}</div>
-        <div><p>檢查結果 · 風險分數 ${result.score}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
+        <div><p>檢查結果 · 證據分數 ${result.score}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
         <span class="category">可能類型：${escapeHtml(result.category)}</span>
       </div>
       <div class="result-columns">
@@ -277,6 +312,7 @@ function renderResult(result: AnalysisResult) {
       ${databasePanel}
       ${communityPanel}
       ${semanticPanel}
+      ${evidencePanel}
       <button type="button" class="reset-button" id="reset-button">檢查另一則內容</button>
     </div>`
   resultWrap.hidden = false
@@ -302,6 +338,49 @@ function renderSemanticResult(semantic: SemanticSearchResult) {
     return `<section class="database-panel database-error"><div class="database-title"><span>!</span><div><h3>本機語意模型暫時無法使用</h3><p>本次仍已完成話術、網址、政府與社群案例庫比對</p></div></div></section>`
   }
   return ''
+}
+
+function renderEvidencePanel(result: AnalysisResult) {
+  const database = result.database
+  const databaseStatus: Record<DatabaseSearchResult['status'], string> = {
+    matched: `命中 ${database.matches.length} 筆；命中的是完整網域或其上層網域。`,
+    'not-matched': `已查詢 ${database.searchedDomains.map(escapeHtml).join('、') || '辨識到的網址'}，未找到相同網域。未命中不代表安全。`,
+    'no-domain': 'OCR／文字中沒有辨識出可供精確比對的網域，因此沒有進行網域命中判定。',
+    unavailable: `資料庫無法載入：${escapeHtml(database.error ?? '原因不明')}。`,
+  }
+  const sourceRows = (database.sources ?? []).map((source) => `
+    <li><a href="${escapeHtml(source.datasetUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.name)} ↗</a><span>本版匯入 ${source.importedRows.toLocaleString('zh-TW')} 列 · ${escapeHtml(source.license)}</span></li>`).join('')
+  const communityStatus = result.community.status === 'matched'
+    ? `命中 ${result.community.matches.length} 筆去識別化案例。`
+    : result.community.status === 'not-matched'
+      ? '未命中目前的去識別化案例。案例庫規模有限，未命中不代表安全。'
+      : `案例庫無法載入：${escapeHtml(result.community.error ?? '原因不明')}。`
+  const semanticStatus = result.semantic.status === 'matched'
+    ? `本機模型找到「${escapeHtml(result.semantic.matches[0]?.category ?? '相似手法')}」語意近似。`
+    : result.semantic.status === 'not-matched'
+      ? '本機模型未達語意相似門檻。'
+      : result.semantic.status === 'disabled'
+        ? '使用者已關閉本機語意模型。'
+        : '本機語意模型無法載入。'
+  const ocrRow = result.context.source === 'image'
+    ? `<li><strong>截圖文字擷取</strong><span>OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · ${result.context.ocrPasses === 2 ? '完整畫面＋網址列加強辨識' : '完整畫面辨識'}；信心值不是詐騙機率。</span></li>`
+    : `<li><strong>輸入內容</strong><span>${result.context.source === 'file' ? '由文字檔匯入' : '由使用者貼上'}，直接進行本機比對。</span></li>`
+  const officialReferences = [...new Map(result.findings
+    .filter((finding) => finding.source)
+    .map((finding) => [finding.source!.url, finding.source!])).values()]
+    .map((source) => `<li><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.name)} ↗</a><span>用於核對官方網域或官方防詐聲明。</span></li>`).join('')
+
+  return `<section class="evidence-panel">
+    <div class="evidence-heading"><div><p>可追溯的判斷依據</p><h3>本次實際查了哪些資料</h3></div><span>證據分數 ≠ 詐騙機率</span></div>
+    <ol class="evidence-steps">
+      ${ocrRow}
+      <li><strong>政府涉詐網域快照</strong><span>${databaseStatus[database.status]} 資料版次 ${escapeHtml(database.version ?? '未知')}，共 ${(database.recordCount ?? 0).toLocaleString('zh-TW')} 個去重網域。</span></li>
+      <li><strong>社群案例話術庫</strong><span>${communityStatus} 版次 ${escapeHtml(result.community.version ?? '未知')}，共 ${result.community.recordCount ?? 0} 筆。</span></li>
+      <li><strong>本機語意 AI</strong><span>${semanticStatus} 只在裝置內運算，不是外部資料庫查詢。</span></li>
+    </ol>
+    ${sourceRows || officialReferences ? `<div class="source-ledger"><h4>資料來源與官方核對</h4><ul>${sourceRows}${officialReferences}</ul></div>` : ''}
+    <p class="evidence-limit">本工具目前不會自動把內容送到 165 網站搜尋、MyGoPen 或 Google Safe Browsing；下方僅提供外部查證連結。所有「未命中」都只代表在上述版本與可辨識內容中沒有找到相同資料，不能解讀為安全。</p>
+  </section>`
 }
 
 function renderCommunityResult(community: CommunitySearchResult) {
@@ -400,12 +479,11 @@ imageInput.addEventListener('change', async () => {
   scanButton.disabled = true
 
   try {
-    const worker = await getOcrWorker()
-    const { data } = await worker.recognize(file)
-    const recognizedText = data.text.trim()
+    const recognized = await recognizeScreenshot(file)
+    const recognizedText = recognized.text.trim()
     if (!recognizedText) throw new Error('沒有辨識到文字')
     input.value = recognizedText.slice(0, 12000)
-    analysisContext = { source: 'image', ocrConfidence: data.confidence }
+    analysisContext = { source: 'image', ocrConfidence: recognized.confidence, ocrPasses: recognized.passes }
     updateCounter()
     updateOcrProgress(1, 'recognizing text')
     ocrTitle.textContent = '截圖文字辨識完成'
@@ -461,4 +539,5 @@ scanButton.addEventListener('click', runScan)
 
 window.addEventListener('pagehide', () => {
   void ocrWorkerPromise?.then((worker) => worker.terminate())
+  void ocrEnglishWorkerPromise?.then((worker) => worker.terminate())
 })

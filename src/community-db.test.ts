@@ -40,4 +40,10 @@ describe('matchCommunityRecords', () => {
     expect(result.status).toBe('matched')
     expect(result.matches[0].matchedSignals.length).toBeGreaterThanOrEqual(2)
   })
+
+  it('matches CJK text even when screenshot OCR inserts spaces', () => {
+    const result = matchCommunityRecords('邀 請 您 加 入 社 群 看 商 品 資 訊 所 以 打 電 話 提 醒 妳 完 成 申 請', database)
+    expect(result.status).toBe('matched')
+    expect(result.matches[0].matchedSignals.length).toBeGreaterThanOrEqual(2)
+  })
 })
