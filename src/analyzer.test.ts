@@ -61,4 +61,30 @@ describe('analyzeContent', () => {
     expect(result.category).toBe('社群導流／個資蒐集')
     expect(result.summary).toContain('社群詐騙案例')
   })
+
+  it('detects an unseen social-engineering combination without database history', () => {
+    const result = analyzeContent('活動小編說要留下姓名電話完成登記，再邀請我轉到新的 Telegram 群組，沒回覆還會打電話確認。')
+    expect(result.level).toBe('high')
+    expect(result.findings.some((finding) => finding.title.includes('個人資料'))).toBe(true)
+    expect(result.findings.some((finding) => finding.title.includes('另一個社群'))).toBe(true)
+    expect(result.findings.some((finding) => finding.title.includes('多項社交工程'))).toBe(true)
+  })
+
+  it('flags form-based personal-data collection even without a URL', () => {
+    const result = analyzeContent('請填寫姓名、電話與地址完成活動登記。')
+    expect(result.level).toBe('medium')
+    expect(result.category).toBe('個資蒐集')
+  })
+
+  it('does not show a green result when screenshot OCR confidence is low', () => {
+    const result = analyzeContent('晚點再聯絡', undefined, undefined, { source: 'image', ocrConfidence: 42 })
+    expect(result.level).toBe('medium')
+    expect(result.findings.some((finding) => finding.title.includes('可信度不足'))).toBe(true)
+  })
+
+  it('uses a cautious result for an otherwise unmatched screenshot', () => {
+    const result = analyzeContent('明天下午三點見面', undefined, undefined, { source: 'image', ocrConfidence: 91 })
+    expect(result.level).toBe('medium')
+    expect(result.findings.some((finding) => finding.title.includes('足夠資訊'))).toBe(true)
+  })
 })

@@ -20,12 +20,18 @@ export interface AnalysisResult {
   community: CommunitySearchResult
 }
 
+export interface AnalysisContext {
+  source?: 'text' | 'image' | 'file'
+  ocrConfidence?: number
+}
+
 interface Rule {
   pattern: RegExp
   title: string
   detail: string
   weight: number
   category: string
+  behavior?: string
 }
 
 const rules: Rule[] = [
@@ -84,6 +90,39 @@ const rules: Rule[] = [
     detail: '詐騙廣告常將人帶往假客服或私人 LINE 帳號。',
     weight: 12,
     category: '社群導流',
+    behavior: 'channel-switch',
+  },
+  {
+    pattern: /(填|提供|留下|回覆).{0,12}(資料|姓名|電話|地址|生日|身分證|暱稱)|Google\s*(表單|問卷)|完成.{0,8}(申請|登記|認證)/i,
+    title: '要求填寫或提供個人資料',
+    detail: '陌生人以申請、登記或寄送為由要求資料，可能是在建立詐騙名單或準備後續話術。',
+    weight: 25,
+    category: '個資蒐集',
+    behavior: 'personal-data',
+  },
+  {
+    pattern: /(加入|邀請|拉進|移到|轉到).{0,16}(另一個|新的|指定)?\s*(LINE|賴|Telegram|WhatsApp|Discord|社群|群組)|掃描?.{0,8}(QR|二維碼)/i,
+    title: '要求轉移到另一個社群或通訊管道',
+    detail: '把互動從原平台轉往陌生群組，會降低平台保護並方便對方持續施壓。',
+    weight: 20,
+    category: '社群導流',
+    behavior: 'channel-switch',
+  },
+  {
+    pattern: /(沒接|未接|不回|未回覆|已讀不回).{0,18}(電話|來電|再打|提醒|聯絡)|(打|撥).{0,8}電話.{0,16}(提醒|催|確認)/i,
+    title: '未回覆後持續來電或追催',
+    detail: '一般社群交流不應在你未回覆時持續以電話或訊息施壓。',
+    weight: 16,
+    category: '高壓導流',
+    behavior: 'persistent-contact',
+  },
+  {
+    pattern: /(免費|贈送|抽獎|領取|試用).{0,16}(禮物|贈品|商品|名額|課程)|寵物投票|毛孩.{0,8}(活動|生活|社群)|免費領養/i,
+    title: '以免費贈品或興趣活動吸引互動',
+    detail: '免費商品、寵物或興趣活動本身不一定有問題，但常被用來降低戒心並導向私下聯絡。',
+    weight: 8,
+    category: '誘餌型社交工程',
+    behavior: 'lure',
   },
 ]
 
@@ -128,6 +167,7 @@ export function analyzeContent(
   content: string,
   database: DatabaseSearchResult = emptyDatabaseResult,
   community: CommunitySearchResult = emptyCommunityResult,
+  context: AnalysisContext = {},
 ): AnalysisResult {
   const text = content.trim()
   const matchedRules = rules.filter((rule) => rule.pattern.test(text))
@@ -143,6 +183,29 @@ export function analyzeContent(
     detail: `${signal.detail}（去識別化案例來源：${match.source}）`,
     weight: index === 0 ? 38 : 14,
   }))))
+
+  const behaviorCount = new Set(matchedRules.flatMap((rule) => rule.behavior ? [rule.behavior] : [])).size
+  if (behaviorCount >= 2) {
+    findings.push({
+      title: '多項社交工程行為同時出現',
+      detail: '內容同時包含轉移管道、索取資料、持續追催或誘餌等行為；組合出現時風險會明顯提高。',
+      weight: 18,
+    })
+  }
+
+  if (context.source === 'image' && (context.ocrConfidence ?? 0) < 60) {
+    findings.push({
+      title: '截圖文字辨識可信度不足',
+      detail: '部分文字可能沒有被正確讀取，因此不能把「未命中」視為安全，建議核對辨識文字或換清晰截圖。',
+      weight: 26,
+    })
+  } else if (context.source === 'image' && findings.length === 0) {
+    findings.push({
+      title: '截圖未提供足夠資訊確認安全',
+      detail: '圖片辨識可能遺漏關鍵內容；沒有網址或沒有命中案例，不代表對方可信。',
+      weight: 25,
+    })
+  }
 
   const score = Math.min(100, findings.reduce((sum, finding) => sum + finding.weight, 0))
   const level: RiskLevel = score >= 55 ? 'high' : score >= 25 ? 'medium' : 'low'

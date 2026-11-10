@@ -1,6 +1,6 @@
 import './styles.css'
 import type { Worker } from 'tesseract.js'
-import { analyzeContent, type AnalysisResult, type RiskLevel } from './analyzer'
+import { analyzeContent, type AnalysisContext, type AnalysisResult, type RiskLevel } from './analyzer'
 import { searchCommunityDatabase, type CommunitySearchResult } from './community-db'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
 
@@ -196,6 +196,7 @@ const scanButton = document.querySelector<HTMLButtonElement>('#scan-button')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrl = ''
 let ocrWorkerPromise: Promise<Worker> | null = null
+let analysisContext: AnalysisContext = { source: 'text' }
 
 function updateCounter() {
   counter.textContent = `${input.value.length.toLocaleString('zh-TW')} / 12,000`
@@ -271,6 +272,7 @@ function renderResult(result: AnalysisResult) {
   resultWrap.scrollIntoView({ behavior: 'smooth', block: 'start' })
   document.querySelector<HTMLButtonElement>('#reset-button')?.addEventListener('click', () => {
     input.value = ''
+    analysisContext = { source: 'text' }
     fileInput.value = ''
     resetImageUpload()
     fileName.textContent = ''
@@ -321,12 +323,16 @@ function renderDatabaseResult(database: DatabaseSearchResult) {
   return `<section class="database-panel database-error"><div class="database-title"><span>!</span><div><h3>政府資料庫暫時無法載入</h3><p>${escapeHtml(database.error ?? '仍已完成本機話術分析')}</p></div></div><p class="database-warning">目前結果未包含資料庫比對，請稍後重試或使用下方官方查證入口。</p></section>`
 }
 
-input.addEventListener('input', updateCounter)
+input.addEventListener('input', () => {
+  analysisContext = { source: 'text' }
+  updateCounter()
+})
 
 document.querySelectorAll<HTMLButtonElement>('[data-example]').forEach((button) => {
   button.addEventListener('click', () => {
     const key = button.dataset.example as keyof typeof examples
     input.value = examples[key]
+    analysisContext = { source: 'text' }
     updateCounter()
     input.focus()
   })
@@ -340,6 +346,7 @@ fileInput.addEventListener('change', async () => {
     return
   }
   input.value = (await file.text()).slice(0, 12000)
+  analysisContext = { source: 'file' }
   fileName.textContent = `已匯入：${file.name}`
   updateCounter()
 })
@@ -376,6 +383,7 @@ imageInput.addEventListener('change', async () => {
     const recognizedText = data.text.trim()
     if (!recognizedText) throw new Error('沒有辨識到文字')
     input.value = recognizedText.slice(0, 12000)
+    analysisContext = { source: 'image', ocrConfidence: data.confidence }
     updateCounter()
     updateOcrProgress(1, 'recognizing text')
     ocrTitle.textContent = '截圖文字辨識完成'
@@ -407,7 +415,7 @@ async function runScan() {
       searchThreatDatabase(input.value),
       searchCommunityDatabase(input.value),
     ])
-    renderResult(analyzeContent(input.value, database, community))
+    renderResult(analyzeContent(input.value, database, community, analysisContext))
   } finally {
     scanButton.disabled = false
     scanButton.innerHTML = '<span>開始檢查</span><span aria-hidden="true">→</span>'
