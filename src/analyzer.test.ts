@@ -87,4 +87,21 @@ describe('analyzeContent', () => {
     expect(result.level).toBe('medium')
     expect(result.findings.some((finding) => finding.title.includes('足夠資訊'))).toBe(true)
   })
+
+  it('uses a local semantic match when fixed keywords do not match', () => {
+    const result = analyzeContent(
+      '對方用很繞的方式叫我去別的地方聊，還希望我先交一些聯絡資訊。',
+      undefined,
+      undefined,
+      { source: 'text' },
+      {
+        status: 'matched',
+        model: 'test-model',
+        matches: [{ category: '社群導流／個資蒐集', similarity: 0.72, example: '測試案例' }],
+      },
+    )
+    expect(result.level).toBe('medium')
+    expect(result.category).toBe('社群導流／個資蒐集')
+    expect(result.findings.some((finding) => finding.title.includes('本機語意 AI'))).toBe(true)
+  })
 })

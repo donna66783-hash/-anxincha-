@@ -1,5 +1,6 @@
 import type { CommunitySearchResult } from './community-db'
 import type { DatabaseSearchResult } from './threat-db'
+import type { SemanticSearchResult } from './semantic-analyzer'
 
 export type RiskLevel = 'low' | 'medium' | 'high'
 
@@ -18,6 +19,7 @@ export interface AnalysisResult {
   actions: string[]
   database: DatabaseSearchResult
   community: CommunitySearchResult
+  semantic: SemanticSearchResult
 }
 
 export interface AnalysisContext {
@@ -162,12 +164,14 @@ function inspectUrl(raw: string): Finding[] {
 
 const emptyDatabaseResult: DatabaseSearchResult = { status: 'unavailable', matches: [], searchedDomains: [] }
 const emptyCommunityResult: CommunitySearchResult = { status: 'unavailable', matches: [] }
+const emptySemanticResult: SemanticSearchResult = { status: 'disabled', matches: [], model: '' }
 
 export function analyzeContent(
   content: string,
   database: DatabaseSearchResult = emptyDatabaseResult,
   community: CommunitySearchResult = emptyCommunityResult,
   context: AnalysisContext = {},
+  semantic: SemanticSearchResult = emptySemanticResult,
 ): AnalysisResult {
   const text = content.trim()
   const matchedRules = rules.filter((rule) => rule.pattern.test(text))
@@ -183,6 +187,11 @@ export function analyzeContent(
     detail: `${signal.detail}（去識別化案例來源：${match.source}）`,
     weight: index === 0 ? 38 : 14,
   }))))
+  findings.push(...semantic.matches.slice(0, 2).map((match, index) => ({
+    title: index === 0 ? `本機語意 AI 辨識：${match.category}` : `語意近似：${match.category}`,
+    detail: `內容與已知「${match.category}」手法的語意相似度為 ${Math.round(match.similarity * 100)}%；這是風險提示，不是司法認定。`,
+    weight: match.similarity >= 0.76 ? 36 : 25,
+  })))
 
   const behaviorCount = new Set(matchedRules.flatMap((rule) => rule.behavior ? [rule.behavior] : [])).size
   if (behaviorCount >= 2) {
@@ -215,6 +224,7 @@ export function analyzeContent(
   }, {})
   const category = database.matches[0]?.category
     ?? community.matches[0]?.category
+    ?? semantic.matches[0]?.category
     ?? Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0]
     ?? '尚未辨識特定類型'
 
@@ -236,6 +246,7 @@ export function analyzeContent(
     findings,
     database,
     community,
+    semantic,
     actions: level === 'high'
       ? ['不要匯款、點連結或提供驗證碼', '掛斷後自行查找官方電話重新聯絡', '撥打 165，或請可信任的家人一起確認']
       : level === 'medium'

@@ -2,6 +2,7 @@ import './styles.css'
 import type { Worker } from 'tesseract.js'
 import { analyzeContent, type AnalysisContext, type AnalysisResult, type RiskLevel } from './analyzer'
 import { searchCommunityDatabase, type CommunitySearchResult } from './community-db'
+import { searchSemanticSimilarity, type SemanticProgress, type SemanticSearchResult } from './semantic-analyzer'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
 
 const examples = {
@@ -91,6 +92,12 @@ app.innerHTML = `
           <button type="button" data-example="normal">一般家人訊息</button>
           <button type="button" data-example="database">資料庫命中網址</button>
         </div>
+
+        <label class="semantic-option" for="semantic-toggle">
+          <input id="semantic-toggle" type="checkbox" checked />
+          <span class="semantic-switch" aria-hidden="true"></span>
+          <span><strong>使用本機語意 AI 加強判斷</strong><small id="semantic-status">首次約下載 150 MB，之後由瀏覽器快取；你的訊息不會上傳。</small></span>
+        </label>
 
         <button class="scan-button" id="scan-button" type="button">
           <span>開始檢查</span><span aria-hidden="true">→</span>
@@ -193,6 +200,8 @@ const ocrProgress = document.querySelector<HTMLElement>('#ocr-progress')!
 const progressTrack = document.querySelector<HTMLElement>('.progress-track')!
 const removeImageButton = document.querySelector<HTMLButtonElement>('#remove-image')!
 const scanButton = document.querySelector<HTMLButtonElement>('#scan-button')!
+const semanticToggle = document.querySelector<HTMLInputElement>('#semantic-toggle')!
+const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrl = ''
 let ocrWorkerPromise: Promise<Worker> | null = null
@@ -252,6 +261,7 @@ function renderResult(result: AnalysisResult) {
     : '<li class="no-finding"><span>✓</span><div><strong>未比對到常見高風險話術</strong><p>詐騙手法會持續變化，仍請確認對方身分與網址來源。</p></div></li>'
   const databasePanel = renderDatabaseResult(result.database)
   const communityPanel = renderCommunityResult(result.community)
+  const semanticPanel = renderSemanticResult(result.semantic)
 
   resultWrap.innerHTML = `
     <div class="result-card risk-${result.level}">
@@ -266,6 +276,7 @@ function renderResult(result: AnalysisResult) {
       </div>
       ${databasePanel}
       ${communityPanel}
+      ${semanticPanel}
       <button type="button" class="reset-button" id="reset-button">檢查另一則內容</button>
     </div>`
   resultWrap.hidden = false
@@ -280,6 +291,17 @@ function renderResult(result: AnalysisResult) {
     updateCounter()
     input.focus()
   })
+}
+
+function renderSemanticResult(semantic: SemanticSearchResult) {
+  if (semantic.status === 'matched') {
+    const matches = semantic.matches.map((match) => `<li><div><strong>${escapeHtml(match.category)}</strong><span>${Math.round(match.similarity * 100)}% 相似</span></div><p>與去識別化的常見詐騙手法語意接近；請搭配其他警訊與官方查證結果判斷。</p></li>`).join('')
+    return `<section class="database-panel semantic-hit"><div class="database-title"><span>AI</span><div><h3>本機語意模型找到相似手法</h3><p>多語語意比對已在這台裝置完成，訊息沒有上傳</p></div></div><ul>${matches}</ul><p class="database-warning">語意相似不代表對方已被認定涉詐，也可能有誤判；請勿只憑單一分數決定。</p></section>`
+  }
+  if (semantic.status === 'unavailable') {
+    return `<section class="database-panel database-error"><div class="database-title"><span>!</span><div><h3>本機語意模型暫時無法使用</h3><p>本次仍已完成話術、網址、政府與社群案例庫比對</p></div></div></section>`
+  }
+  return ''
 }
 
 function renderCommunityResult(community: CommunitySearchResult) {
@@ -409,15 +431,28 @@ async function runScan() {
   }
   input.removeAttribute('aria-invalid')
   scanButton.disabled = true
-  scanButton.innerHTML = '<span>正在載入政府資料庫並比對…</span>'
+  semanticToggle.disabled = true
+  scanButton.innerHTML = '<span>正在載入資料庫並比對…</span>'
+  const updateSemanticProgress = ({ percent, message }: SemanticProgress) => {
+    const progress = percent === null ? '' : ` ${percent}%`
+    semanticStatus.textContent = `${message}${progress}；訊息仍只在本機處理。`
+    scanButton.innerHTML = `<span>${escapeHtml(message)}${progress}</span>`
+  }
   try {
-    const [database, community] = await Promise.all([
+    const [database, community, semantic] = await Promise.all([
       searchThreatDatabase(input.value),
       searchCommunityDatabase(input.value),
+      searchSemanticSimilarity(input.value, semanticToggle.checked, updateSemanticProgress),
     ])
-    renderResult(analyzeContent(input.value, database, community, analysisContext))
+    if (semantic.status === 'unavailable') {
+      semanticStatus.textContent = '模型載入失敗；目前仍會使用話術、網址與案例資料庫判斷。'
+    } else if (semantic.status !== 'disabled') {
+      semanticStatus.textContent = '本機語意模型已就緒；你的訊息不會上傳。'
+    }
+    renderResult(analyzeContent(input.value, database, community, analysisContext, semantic))
   } finally {
     scanButton.disabled = false
+    semanticToggle.disabled = false
     scanButton.innerHTML = '<span>開始檢查</span><span aria-hidden="true">→</span>'
   }
 }
