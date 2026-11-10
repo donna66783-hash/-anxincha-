@@ -1,4 +1,5 @@
 import './styles.css'
+import type { Worker } from 'tesseract.js'
 import { analyzeContent, type AnalysisResult, type RiskLevel } from './analyzer'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
 
@@ -58,14 +59,28 @@ app.innerHTML = `
         <label class="sr-only" for="content-input">可疑訊息或網址</label>
         <textarea id="content-input" maxlength="12000" placeholder="例如：把 LINE 對話、簡訊或可疑網址貼在這裡⋯"></textarea>
         <div class="input-footer">
-          <div class="file-actions">
+          <div class="file-actions" aria-label="匯入內容">
+            <label class="file-button image-button" for="image-input">
+              <span aria-hidden="true">▧</span> 上傳截圖辨識
+            </label>
+            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" />
             <label class="file-button" for="file-input">
-              <span aria-hidden="true">＋</span> 匯入 LINE 對話 .txt
+              <span aria-hidden="true">＋</span> 匯入 LINE .txt
             </label>
             <input id="file-input" type="file" accept=".txt,text/plain" />
             <span id="file-name" aria-live="polite"></span>
           </div>
           <span id="char-count">0 / 12,000</span>
+        </div>
+
+        <div class="image-preview" id="image-preview" hidden>
+          <img id="preview-image" alt="待辨識的截圖預覽" />
+          <div class="ocr-details">
+            <div class="ocr-heading"><strong id="ocr-title">準備辨識截圖</strong><span id="ocr-percent">0%</span></div>
+            <div class="progress-track" role="progressbar" aria-label="截圖文字辨識進度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="ocr-progress"></span></div>
+            <p id="ocr-status" aria-live="polite">圖片只會在這台裝置處理，不會上傳。</p>
+            <button type="button" class="remove-image" id="remove-image">移除截圖</button>
+          </div>
         </div>
 
         <div class="quick-examples">
@@ -135,7 +150,7 @@ app.innerHTML = `
         <h2 id="how-title">遇到可疑訊息，不用自己猜</h2>
       </div>
       <div class="steps">
-        <article><span>01</span><div class="step-icon">貼</div><h3>貼上內容</h3><p>複製訊息、網址，或匯入 LINE 對話文字檔。</p></article>
+        <article><span>01</span><div class="step-icon">貼</div><h3>貼上或上傳</h3><p>複製訊息、網址，或上傳對話截圖與 LINE 文字檔。</p></article>
         <article><span>02</span><div class="step-icon">查</div><h3>本機分析</h3><p>在你的瀏覽器比對常見話術與網址風險。</p></article>
         <article><span>03</span><div class="step-icon">停</div><h3>採取行動</h3><p>看懂可疑原因，再依建議查證或求助。</p></article>
       </div>
@@ -166,12 +181,56 @@ app.innerHTML = `
 const input = document.querySelector<HTMLTextAreaElement>('#content-input')!
 const counter = document.querySelector<HTMLSpanElement>('#char-count')!
 const fileInput = document.querySelector<HTMLInputElement>('#file-input')!
+const imageInput = document.querySelector<HTMLInputElement>('#image-input')!
 const fileName = document.querySelector<HTMLSpanElement>('#file-name')!
+const imagePreview = document.querySelector<HTMLElement>('#image-preview')!
+const previewImage = document.querySelector<HTMLImageElement>('#preview-image')!
+const ocrTitle = document.querySelector<HTMLElement>('#ocr-title')!
+const ocrPercent = document.querySelector<HTMLElement>('#ocr-percent')!
+const ocrStatus = document.querySelector<HTMLElement>('#ocr-status')!
+const ocrProgress = document.querySelector<HTMLElement>('#ocr-progress')!
+const progressTrack = document.querySelector<HTMLElement>('.progress-track')!
+const removeImageButton = document.querySelector<HTMLButtonElement>('#remove-image')!
 const scanButton = document.querySelector<HTMLButtonElement>('#scan-button')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
+let previewUrl = ''
+let ocrWorkerPromise: Promise<Worker> | null = null
 
 function updateCounter() {
   counter.textContent = `${input.value.length.toLocaleString('zh-TW')} / 12,000`
+}
+
+function updateOcrProgress(progress: number, status: string) {
+  const percent = Math.max(0, Math.min(100, Math.round(progress * 100)))
+  const statusLabels: Record<string, string> = {
+    'loading tesseract core': '載入文字辨識引擎',
+    'initializing tesseract': '初始化文字辨識引擎',
+    'loading language traineddata': '首次下載繁中辨識模型',
+    'initializing api': '準備辨識繁體中文與英文',
+    'recognizing text': '正在讀取截圖文字',
+  }
+  ocrPercent.textContent = `${percent}%`
+  ocrProgress.style.width = `${percent}%`
+  progressTrack.setAttribute('aria-valuenow', String(percent))
+  ocrStatus.textContent = statusLabels[status] ?? '正在準備文字辨識…'
+}
+
+function resetImageUpload() {
+  imageInput.value = ''
+  imagePreview.hidden = true
+  if (previewUrl) URL.revokeObjectURL(previewUrl)
+  previewUrl = ''
+  previewImage.removeAttribute('src')
+  updateOcrProgress(0, '')
+}
+
+async function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = import('tesseract.js').then(({ createWorker }) => createWorker(['chi_tra', 'eng'], undefined, {
+      logger: ({ progress, status }) => updateOcrProgress(progress, status),
+    }))
+  }
+  return ocrWorkerPromise
 }
 
 function escapeHtml(value: string) {
@@ -210,6 +269,7 @@ function renderResult(result: AnalysisResult) {
   document.querySelector<HTMLButtonElement>('#reset-button')?.addEventListener('click', () => {
     input.value = ''
     fileInput.value = ''
+    resetImageUpload()
     fileName.textContent = ''
     resultWrap.hidden = true
     updateCounter()
@@ -270,7 +330,55 @@ fileInput.addEventListener('change', async () => {
   updateCounter()
 })
 
-scanButton.addEventListener('click', async () => {
+removeImageButton.addEventListener('click', resetImageUpload)
+
+imageInput.addEventListener('change', async () => {
+  const file = imageInput.files?.[0]
+  if (!file) return
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+    fileName.textContent = '僅支援 PNG、JPG 或 WebP 圖片。'
+    resetImageUpload()
+    return
+  }
+  if (file.size > 10_000_000) {
+    fileName.textContent = '圖片超過 10 MB，請縮小後再試。'
+    resetImageUpload()
+    return
+  }
+
+  if (previewUrl) URL.revokeObjectURL(previewUrl)
+  previewUrl = URL.createObjectURL(file)
+  previewImage.src = previewUrl
+  imagePreview.hidden = false
+  fileName.textContent = ''
+  ocrTitle.textContent = `辨識中：${file.name}`
+  updateOcrProgress(0, '')
+  imageInput.disabled = true
+  scanButton.disabled = true
+
+  try {
+    const worker = await getOcrWorker()
+    const { data } = await worker.recognize(file)
+    const recognizedText = data.text.trim()
+    if (!recognizedText) throw new Error('沒有辨識到文字')
+    input.value = recognizedText.slice(0, 12000)
+    updateCounter()
+    updateOcrProgress(1, 'recognizing text')
+    ocrTitle.textContent = '截圖文字辨識完成'
+    ocrStatus.textContent = '文字已填入下方內容並開始比對；你也可以先修改辨識結果。'
+    await runScan()
+  } catch (error) {
+    ocrTitle.textContent = '截圖辨識失敗'
+    ocrStatus.textContent = error instanceof Error && error.message === '沒有辨識到文字'
+      ? '圖片中沒有辨識到文字，請換一張清晰、字體較大的截圖。'
+      : '無法載入辨識模型，請確認網路後重試。圖片並未上傳。'
+  } finally {
+    imageInput.disabled = false
+    scanButton.disabled = false
+  }
+})
+
+async function runScan() {
   if (!input.value.trim()) {
     input.focus()
     input.setAttribute('aria-invalid', 'true')
@@ -287,4 +395,10 @@ scanButton.addEventListener('click', async () => {
     scanButton.disabled = false
     scanButton.innerHTML = '<span>開始檢查</span><span aria-hidden="true">→</span>'
   }
+}
+
+scanButton.addEventListener('click', runScan)
+
+window.addEventListener('pagehide', () => {
+  void ocrWorkerPromise?.then((worker) => worker.terminate())
 })
