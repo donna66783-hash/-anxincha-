@@ -1,3 +1,6 @@
+import type { CommunitySearchResult } from './community-db'
+import type { DatabaseSearchResult } from './threat-db'
+
 export type RiskLevel = 'low' | 'medium' | 'high'
 
 export interface Finding {
@@ -14,6 +17,7 @@ export interface AnalysisResult {
   findings: Finding[]
   actions: string[]
   database: DatabaseSearchResult
+  community: CommunitySearchResult
 }
 
 interface Rule {
@@ -118,8 +122,13 @@ function inspectUrl(raw: string): Finding[] {
 }
 
 const emptyDatabaseResult: DatabaseSearchResult = { status: 'unavailable', matches: [], searchedDomains: [] }
+const emptyCommunityResult: CommunitySearchResult = { status: 'unavailable', matches: [] }
 
-export function analyzeContent(content: string, database: DatabaseSearchResult = emptyDatabaseResult): AnalysisResult {
+export function analyzeContent(
+  content: string,
+  database: DatabaseSearchResult = emptyDatabaseResult,
+  community: CommunitySearchResult = emptyCommunityResult,
+): AnalysisResult {
   const text = content.trim()
   const matchedRules = rules.filter((rule) => rule.pattern.test(text))
   const findings: Finding[] = matchedRules.map(({ title, detail, weight }) => ({ title, detail, weight }))
@@ -129,6 +138,11 @@ export function analyzeContent(content: string, database: DatabaseSearchResult =
     detail: `此網域出現在${match.sources.map((source) => source.name).join('、')}。資料類型：${match.category}${match.lastSeen ? `；資料日期：${match.lastSeen}` : ''}。`,
     weight: 85,
   })))
+  findings.push(...community.matches.slice(0, 3).flatMap((match) => match.matchedSignals.map((signal, index) => ({
+    title: index === 0 ? `社群案例特徵命中：${match.category}` : signal.title,
+    detail: `${signal.detail}（去識別化案例來源：${match.source}）`,
+    weight: index === 0 ? 38 : 14,
+  }))))
 
   const score = Math.min(100, findings.reduce((sum, finding) => sum + finding.weight, 0))
   const level: RiskLevel = score >= 55 ? 'high' : score >= 25 ? 'medium' : 'low'
@@ -136,11 +150,16 @@ export function analyzeContent(content: string, database: DatabaseSearchResult =
     counts[rule.category] = (counts[rule.category] ?? 0) + rule.weight
     return counts
   }, {})
-  const category = database.matches[0]?.category ?? Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '尚未辨識特定類型'
+  const category = database.matches[0]?.category
+    ?? community.matches[0]?.category
+    ?? Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0]
+    ?? '尚未辨識特定類型'
 
   const summaries: Record<RiskLevel, string> = {
     high: database.matches.length
       ? '訊息中的網址已出現在政府公開涉詐資料，請勿開啟、登入或付款。'
+      : community.matches.length
+        ? '內容與已知社群詐騙案例的多項話術特徵相符，請停止提供資料或加入陌生群組。'
       : '出現多項高風險警訊，請先停止互動與付款。',
     medium: '有可疑跡象，繼續操作前請先透過其他管道查證。',
     low: '目前未發現明顯警訊，但這不代表內容一定安全。',
@@ -153,6 +172,7 @@ export function analyzeContent(content: string, database: DatabaseSearchResult =
     summary: summaries[level],
     findings,
     database,
+    community,
     actions: level === 'high'
       ? ['不要匯款、點連結或提供驗證碼', '掛斷後自行查找官方電話重新聯絡', '撥打 165，或請可信任的家人一起確認']
       : level === 'medium'
@@ -160,5 +180,4 @@ export function analyzeContent(content: string, database: DatabaseSearchResult =
         : ['仍請核對寄件者與網址', '不要分享密碼、驗證碼或網銀資料', '情況不對勁時可撥打 165 諮詢'],
   }
 }
-import type { DatabaseSearchResult } from './threat-db'
 

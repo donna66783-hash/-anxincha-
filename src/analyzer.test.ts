@@ -39,4 +39,26 @@ describe('analyzeContent', () => {
     expect(result.score).toBeGreaterThanOrEqual(85)
     expect(result.summary).toContain('政府公開涉詐資料')
   })
+
+  it('treats a multi-signal community case match as high risk without a URL', () => {
+    const result = analyzeContent('請填寫資料加入另一個社群，沒接電話所以再打電話提醒你完成申請。', undefined, {
+      status: 'matched',
+      version: '2026-11-11',
+      recordCount: 1,
+      matches: [{
+        id: 'case-1',
+        source: '去識別化測試案例',
+        observedAt: '2026-11-08',
+        category: '社群導流／個資蒐集',
+        matchedSignals: [
+          { title: '引導加入另一個社群', detail: '導流警訊。' },
+          { title: '要求填寫資料', detail: '個資警訊。' },
+          { title: '電話追催', detail: '施壓警訊。' },
+        ],
+      }],
+    })
+    expect(result.level).toBe('high')
+    expect(result.category).toBe('社群導流／個資蒐集')
+    expect(result.summary).toContain('社群詐騙案例')
+  })
 })

@@ -1,6 +1,7 @@
 import './styles.css'
 import type { Worker } from 'tesseract.js'
 import { analyzeContent, type AnalysisResult, type RiskLevel } from './analyzer'
+import { searchCommunityDatabase, type CommunitySearchResult } from './community-db'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
 
 const examples = {
@@ -249,6 +250,7 @@ function renderResult(result: AnalysisResult) {
     ? result.findings.map((finding) => `<li><span>!</span><div><strong>${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.detail)}</p></div></li>`).join('')
     : '<li class="no-finding"><span>✓</span><div><strong>未比對到常見高風險話術</strong><p>詐騙手法會持續變化，仍請確認對方身分與網址來源。</p></div></li>'
   const databasePanel = renderDatabaseResult(result.database)
+  const communityPanel = renderCommunityResult(result.community)
 
   resultWrap.innerHTML = `
     <div class="result-card risk-${result.level}">
@@ -262,6 +264,7 @@ function renderResult(result: AnalysisResult) {
         <div class="action-panel"><h3>現在建議你這樣做</h3><ol>${result.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join('')}</ol><a href="tel:165">撥打 165 諮詢</a></div>
       </div>
       ${databasePanel}
+      ${communityPanel}
       <button type="button" class="reset-button" id="reset-button">檢查另一則內容</button>
     </div>`
   resultWrap.hidden = false
@@ -275,6 +278,17 @@ function renderResult(result: AnalysisResult) {
     updateCounter()
     input.focus()
   })
+}
+
+function renderCommunityResult(community: CommunitySearchResult) {
+  if (community.status !== 'matched') return ''
+  const matches = community.matches.map((match) => `
+    <li>
+      <div><strong>${escapeHtml(match.category)}</strong><span>${escapeHtml(match.observedAt)}</span></div>
+      <p>${match.matchedSignals.map((signal) => escapeHtml(signal.title)).join('、')}</p>
+      <p>來源：${escapeHtml(match.source)}；僅保存去識別化話術特徵，不保存發文者資料或原始截圖。</p>
+    </li>`).join('')
+  return `<section class="database-panel community-hit"><div class="database-title"><span>!</span><div><h3>社群案例話術庫命中 ${community.matches.length} 筆</h3><p>案例庫 ${escapeHtml(community.version ?? '未知版本')} · ${community.recordCount ?? community.matches.length} 筆去識別化案例</p></div></div><ul>${matches}</ul><p class="database-warning">社群案例只作為風險特徵參考；不代表貼文中的任何個人或組織已被司法認定涉詐。</p></section>`
 }
 
 function formatDatabaseDate(value: string) {
@@ -389,8 +403,11 @@ async function runScan() {
   scanButton.disabled = true
   scanButton.innerHTML = '<span>正在載入政府資料庫並比對…</span>'
   try {
-    const database = await searchThreatDatabase(input.value)
-    renderResult(analyzeContent(input.value, database))
+    const [database, community] = await Promise.all([
+      searchThreatDatabase(input.value),
+      searchCommunityDatabase(input.value),
+    ])
+    renderResult(analyzeContent(input.value, database, community))
   } finally {
     scanButton.disabled = false
     scanButton.innerHTML = '<span>開始檢查</span><span aria-hidden="true">→</span>'

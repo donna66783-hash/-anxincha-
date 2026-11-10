@@ -123,6 +123,8 @@ textarea[aria-invalid="true"] { border-color: #b6372e; }
 .database-warning { margin: 1rem 0 0; color: #5d6862; font-size: .8rem; line-height: 1.7; }
 .database-hit { border-color: #d4aaa3; background: #fff8f6; }
 .database-hit .database-title > span { background: #f3d8d3; color: #9f382f; }
+.community-hit { border-color: #d4aaa3; background: #fff8f6; }
+.community-hit .database-title > span { background: #f3d8d3; color: #9f382f; }
 .database-miss .database-title > span { background: var(--mint); }
 .database-error { border-color: #dcbf86; background: #fffaf0; }
 .database-error .database-title > span { background: #f7e6bd; color: #8a5a12; }

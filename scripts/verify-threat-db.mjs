@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 
 const databasePath = resolve('public', 'data', 'threat-intelligence.json')
 const database = JSON.parse(await readFile(databasePath, 'utf8'))
+const communityPath = resolve('public', 'data', 'community-intelligence.json')
+const community = JSON.parse(await readFile(communityPath, 'utf8'))
 const failures = []
 
 function requireCondition(condition, message) {
@@ -41,6 +43,24 @@ for (let index = 0; index < (database.records?.length ?? 0); index += 1) {
   previousDomain = domain
 }
 
+requireCondition(community.schemaVersion === 1, '社群案例庫 schemaVersion 必須是 1')
+requireCondition(/^\d{4}-\d{2}-\d{2}$/.test(community.version), '社群案例庫 version 必須是 YYYY-MM-DD')
+requireCondition(Array.isArray(community.records), '社群案例庫 records 必須是陣列')
+requireCondition(community.recordCount === community.records?.length, '社群案例庫 recordCount 與實際筆數不一致')
+requireCondition(typeof community.privacy === 'string' && community.privacy.includes('去識別化'), '社群案例庫必須說明去識別化原則')
+
+for (const [index, record] of (community.records ?? []).entries()) {
+  requireCondition(typeof record.id === 'string' && record.id.length > 0, `社群案例第 ${index + 1} 筆缺少 id`)
+  requireCondition(typeof record.source === 'string' && record.source.length > 0, `社群案例 ${record.id} 缺少來源`)
+  requireCondition(/^\d{4}-\d{2}-\d{2}$/.test(record.observedAt), `社群案例 ${record.id} 日期格式錯誤`)
+  requireCondition(Number.isInteger(record.minSignals) && record.minSignals >= 2, `社群案例 ${record.id} 至少需要兩項訊號`)
+  requireCondition(Array.isArray(record.signals) && record.signals.length >= record.minSignals, `社群案例 ${record.id} 訊號不足`)
+  for (const signal of record.signals ?? []) {
+    requireCondition(typeof signal.pattern === 'string' && signal.pattern.length > 0, `社群案例 ${record.id} 含空白規則`)
+    try { new RegExp(signal.pattern, 'i') } catch { failures.push(`社群案例 ${record.id} 含無效規則`) }
+  }
+}
+
 if (failures.length) {
   console.error('特徵庫驗證失敗：')
   for (const failure of failures.slice(0, 30)) console.error(`- ${failure}`)
@@ -48,4 +68,4 @@ if (failures.length) {
   process.exit(1)
 }
 
-console.log(`特徵庫驗證通過：${database.recordCount.toLocaleString('zh-TW')} 個唯一網域、${database.sources.length} 個政府資料來源、版本 ${database.version}`)
+console.log(`特徵庫驗證通過：${database.recordCount.toLocaleString('zh-TW')} 個唯一網域、${community.recordCount.toLocaleString('zh-TW')} 筆去識別化社群案例、版本 ${database.version}`)
