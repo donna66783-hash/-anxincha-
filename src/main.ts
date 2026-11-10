@@ -267,7 +267,7 @@ async function recognizeScreenshot(file: File) {
     const bitmap = await createImageBitmap(file)
     const englishWorker = await getEnglishOcrWorker()
     const top = await englishWorker.recognize(file, {
-      rectangle: { left: 0, top: 0, width: bitmap.width, height: Math.max(1, Math.round(bitmap.height * 0.27)) },
+      rectangle: { left: 0, top: 0, width: bitmap.width, height: Math.max(1, Math.round(bitmap.height * 0.20)) },
     })
     bitmap.close()
     urlText = top.data.text.trim()
