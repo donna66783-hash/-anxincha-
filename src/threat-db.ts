@@ -1,0 +1,132 @@
+export interface ThreatSource {
+  id: number
+  name: string
+  datasetUrl: string
+  license: string
+  importedRows: number
+}
+
+type ThreatRecord = [domain: string, sourceMask: number, categories: string, lastSeen: string]
+
+interface ThreatDatabase {
+  schemaVersion: number
+  version: string
+  generatedAt: string
+  recordCount: number
+  categories: Record<string, string>
+  sources: ThreatSource[]
+  records: ThreatRecord[]
+}
+
+export interface DatabaseMatch {
+  domain: string
+  inputDomain: string
+  category: string
+  lastSeen: string
+  sources: ThreatSource[]
+}
+
+export type DatabaseStatus = 'matched' | 'not-matched' | 'no-domain' | 'unavailable'
+
+export interface DatabaseSearchResult {
+  status: DatabaseStatus
+  matches: DatabaseMatch[]
+  searchedDomains: string[]
+  version?: string
+  recordCount?: number
+  error?: string
+}
+
+let databasePromise: Promise<ThreatDatabase> | undefined
+
+function normalizeDomain(value: string) {
+  let candidate = value.trim().toLowerCase().replace(/[，。！？、；：）】》〉\]}>,!?;:'"]+$/g, '')
+  try {
+    const url = new URL(candidate.includes('://') ? candidate : `https://${candidate}`)
+    candidate = url.hostname
+  } catch {
+    candidate = candidate.split('/')[0]
+  }
+  return candidate.replace(/^www\./, '').replace(/\.$/, '')
+}
+
+export function extractDomains(content: string) {
+  const matches = content.match(/(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:\/[^\s<>"']*)?/gi) ?? []
+  return [...new Set(matches.map(normalizeDomain).filter((domain) => domain.includes('.')))]
+}
+
+function candidateDomains(domain: string) {
+  const labels = domain.split('.')
+  const candidates = [domain]
+  for (let index = 1; index < labels.length - 1; index += 1) candidates.push(labels.slice(index).join('.'))
+  return candidates
+}
+
+function buildMatch(
+  inputDomain: string,
+  record: ThreatRecord,
+  database: Pick<ThreatDatabase, 'categories' | 'sources'>,
+): DatabaseMatch {
+  const [domain, sourceMask, categoryCodes, lastSeen] = record
+  const categories = categoryCodes.split('|').map((code) => database.categories[code]).filter(Boolean)
+  return {
+    domain,
+    inputDomain,
+    category: categories.join('、') || '已知涉詐網站',
+    lastSeen,
+    sources: database.sources.filter((source) => (sourceMask & source.id) !== 0),
+  }
+}
+
+export function searchRecords(
+  content: string,
+  database: Pick<ThreatDatabase, 'version' | 'recordCount' | 'categories' | 'sources' | 'records'>,
+): DatabaseSearchResult {
+  const searchedDomains = extractDomains(content)
+  if (!searchedDomains.length) {
+    return { status: 'no-domain', matches: [], searchedDomains, version: database.version, recordCount: database.recordCount }
+  }
+
+  const index = new Map(database.records.map((record) => [record[0], record]))
+  const matches = searchedDomains.flatMap((inputDomain) => {
+    for (const candidate of candidateDomains(inputDomain)) {
+      const record = index.get(candidate)
+      if (record) return [buildMatch(inputDomain, record, database)]
+    }
+    return []
+  })
+
+  return {
+    status: matches.length ? 'matched' : 'not-matched',
+    matches,
+    searchedDomains,
+    version: database.version,
+    recordCount: database.recordCount,
+  }
+}
+
+async function loadDatabase() {
+  if (!databasePromise) {
+    const databaseUrl = new URL('./data/threat-intelligence.json', document.baseURI)
+    databasePromise = fetch(databaseUrl, { cache: 'no-cache' }).then(async (response) => {
+      if (!response.ok) throw new Error(`資料庫載入失敗（HTTP ${response.status}）`)
+      const database = await response.json() as ThreatDatabase
+      if (database.schemaVersion !== 1 || !Array.isArray(database.records)) throw new Error('資料庫格式不相容')
+      return database
+    })
+  }
+  return databasePromise
+}
+
+export async function searchThreatDatabase(content: string): Promise<DatabaseSearchResult> {
+  try {
+    return searchRecords(content, await loadDatabase())
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      matches: [],
+      searchedDomains: extractDomains(content),
+      error: error instanceof Error ? error.message : '無法載入資料庫',
+    }
+  }
+}

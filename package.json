@@ -1,0 +1,20 @@
+{
+  "name": "anti-scam-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "data:update": "node scripts/update-threat-db.mjs",
+    "data:verify": "node scripts/verify-threat-db.mjs",
+    "check": "npm run data:verify && npm test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^4.0.8"
+  }
+}
