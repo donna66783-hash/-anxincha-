@@ -205,7 +205,6 @@ const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrl = ''
 let ocrWorkerPromise: Promise<Worker> | null = null
-let ocrEnglishWorkerPromise: Promise<Worker> | null = null
 let analysisContext: AnalysisContext = { source: 'text' }
 
 function updateCounter() {
@@ -245,31 +244,52 @@ async function getOcrWorker() {
   return ocrWorkerPromise
 }
 
-async function getEnglishOcrWorker() {
-  if (!ocrEnglishWorkerPromise) {
-    ocrEnglishWorkerPromise = import('tesseract.js').then(async ({ createWorker, PSM }) => {
-      const worker = await createWorker('eng', undefined, {
-        logger: ({ progress, status }) => updateOcrProgress(progress, status),
-      })
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
-      return worker
-    })
+async function releaseOcrWorker() {
+  const pendingWorker = ocrWorkerPromise
+  ocrWorkerPromise = null
+  if (pendingWorker) await pendingWorker.then((worker) => worker.terminate()).catch(() => undefined)
+}
+
+async function prepareOcrImage(file: File) {
+  const bitmap = await createImageBitmap(file)
+  const maxDimension = 1800
+  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height))
+  if (scale === 1) {
+    const dimensions = { width: bitmap.width, height: bitmap.height }
+    bitmap.close()
+    return { image: file as Blob, ...dimensions }
   }
-  return ocrEnglishWorkerPromise
+
+  const width = Math.max(1, Math.round(bitmap.width * scale))
+  const height = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d', { alpha: false })
+  if (!context) {
+    const dimensions = { width: bitmap.width, height: bitmap.height }
+    bitmap.close()
+    return { image: file as Blob, ...dimensions }
+  }
+  context.drawImage(bitmap, 0, 0, width, height)
+  bitmap.close()
+  const image = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+  return { image: image ?? file, width, height }
 }
 
 async function recognizeScreenshot(file: File) {
+  const prepared = await prepareOcrImage(file)
   const worker = await getOcrWorker()
-  const full = await worker.recognize(file)
+  const full = await worker.recognize(prepared.image)
   let urlText = ''
+  ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
   try {
-    ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
-    const bitmap = await createImageBitmap(file)
-    const englishWorker = await getEnglishOcrWorker()
-    const top = await englishWorker.recognize(file, {
-      rectangle: { left: 0, top: 0, width: bitmap.width, height: Math.max(1, Math.round(bitmap.height * 0.20)) },
+    const { PSM } = await import('tesseract.js')
+    await worker.reinitialize('eng')
+    await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
+    const top = await worker.recognize(prepared.image, {
+      rectangle: { left: 0, top: 0, width: prepared.width, height: Math.max(1, Math.round(prepared.height * 0.20)) },
     })
-    bitmap.close()
     urlText = top.data.text.trim()
   } catch {
     // The full-image OCR result remains usable if the URL-focused pass is unsupported.
@@ -359,6 +379,8 @@ function renderEvidencePanel(result: AnalysisResult) {
     ? `本機模型找到「${escapeHtml(result.semantic.matches[0]?.category ?? '相似手法')}」語意近似。`
     : result.semantic.status === 'not-matched'
       ? '本機模型未達語意相似門檻。'
+      : result.semantic.status === 'skipped'
+        ? '規則、網址或案例已提供足夠風險證據，本次免載入大型模型。'
       : result.semantic.status === 'disabled'
         ? '使用者已關閉本機語意模型。'
         : '本機語意模型無法載入。'
@@ -462,8 +484,8 @@ imageInput.addEventListener('change', async () => {
     resetImageUpload()
     return
   }
-  if (file.size > 10_000_000) {
-    fileName.textContent = '圖片超過 10 MB，請縮小後再試。'
+  if (file.size > 20_000_000) {
+    fileName.textContent = '圖片超過 20 MB，請先在手機裁切或縮小後再試。'
     resetImageUpload()
     return
   }
@@ -480,6 +502,7 @@ imageInput.addEventListener('change', async () => {
 
   try {
     const recognized = await recognizeScreenshot(file)
+    await releaseOcrWorker()
     const recognizedText = recognized.text.trim()
     if (!recognizedText) throw new Error('沒有辨識到文字')
     input.value = recognizedText.slice(0, 12000)
@@ -490,10 +513,12 @@ imageInput.addEventListener('change', async () => {
     ocrStatus.textContent = '文字已填入下方內容並開始比對；你也可以先修改辨識結果。'
     await runScan()
   } catch (error) {
+    await releaseOcrWorker()
+    imageInput.value = ''
     ocrTitle.textContent = '截圖辨識失敗'
     ocrStatus.textContent = error instanceof Error && error.message === '沒有辨識到文字'
       ? '圖片中沒有辨識到文字，請換一張清晰、字體較大的截圖。'
-      : '無法載入辨識模型，請確認網路後重試。圖片並未上傳。'
+      : '辨識途中中斷，請直接重新選擇同一張圖片再試。圖片並未上傳；首次使用請保持網路連線。'
   } finally {
     imageInput.disabled = false
     scanButton.disabled = false
@@ -517,13 +542,24 @@ async function runScan() {
     scanButton.innerHTML = `<span>${escapeHtml(message)}${progress}</span>`
   }
   try {
-    const [database, community, semantic] = await Promise.all([
+    const [database, community] = await Promise.all([
       searchThreatDatabase(input.value),
       searchCommunityDatabase(input.value),
-      searchSemanticSimilarity(input.value, semanticToggle.checked, updateSemanticProgress),
     ])
+    const semanticSkipped: SemanticSearchResult = {
+      status: semanticToggle.checked ? 'skipped' : 'disabled',
+      matches: [],
+      model: '',
+      skipReason: semanticToggle.checked ? 'deterministic-evidence' : undefined,
+    }
+    const baseResult = analyzeContent(input.value, database, community, analysisContext, semanticSkipped)
+    const semantic = semanticToggle.checked && baseResult.score < 25
+      ? await searchSemanticSimilarity(input.value, true, updateSemanticProgress)
+      : semanticSkipped
     if (semantic.status === 'unavailable') {
       semanticStatus.textContent = '模型載入失敗；目前仍會使用話術、網址與案例資料庫判斷。'
+    } else if (semantic.status === 'skipped') {
+      semanticStatus.textContent = '規則或資料庫已有風險證據，本次免下載大型 AI 模型。'
     } else if (semantic.status !== 'disabled') {
       semanticStatus.textContent = '本機語意模型已就緒；你的訊息不會上傳。'
     }
@@ -539,5 +575,4 @@ scanButton.addEventListener('click', runScan)
 
 window.addEventListener('pagehide', () => {
   void ocrWorkerPromise?.then((worker) => worker.terminate())
-  void ocrEnglishWorkerPromise?.then((worker) => worker.terminate())
 })

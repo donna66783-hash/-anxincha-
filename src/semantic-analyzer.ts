@@ -9,10 +9,11 @@ export interface SemanticMatch {
 }
 
 export interface SemanticSearchResult {
-  status: 'matched' | 'not-matched' | 'disabled' | 'unavailable'
+  status: 'matched' | 'not-matched' | 'disabled' | 'skipped' | 'unavailable'
   matches: SemanticMatch[]
   model: string
   error?: string
+  skipReason?: string
 }
 
 export interface SemanticProgress {

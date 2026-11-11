@@ -123,4 +123,19 @@ describe('analyzeContent', () => {
     expect(result.level).toBe('high')
     expect(result.category).toBe('假客服／假訂單')
   })
+
+  it('flags an unnamed high-salary job post that diverts applicants to a private LINE ID', () => {
+    const result = analyzeContent(`外商半導體測試設備商的應用工程師 FAE，年薪 150–200 萬，新竹、高雄都有缺。
+條件符合的話留言或私訊我聊。
+賴👉@aaa886`)
+    expect(result.level).toBe('medium')
+    expect(result.score).toBeGreaterThanOrEqual(40)
+    expect(result.category).toBe('求職招募導流')
+    expect(result.findings.some((finding) => finding.title.includes('未具名職缺'))).toBe(true)
+  })
+
+  it('does not flag a normal job-page announcement without private contact diversion', () => {
+    const result = analyzeContent('本公司公開招募應用工程師，職務內容與投遞方式請查看 https://careers.example.com/jobs/123。')
+    expect(result.level).toBe('low')
+  })
 })
