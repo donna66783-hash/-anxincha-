@@ -277,12 +277,6 @@ async function prepareOcrImage(file: File) {
   const bitmap = await createImageBitmap(file)
   const maxDimension = 1800
   const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height))
-  if (scale === 1) {
-    const dimensions = { width: bitmap.width, height: bitmap.height }
-    bitmap.close()
-    return { image: file as Blob, ...dimensions }
-  }
-
   const width = Math.max(1, Math.round(bitmap.width * scale))
   const height = Math.max(1, Math.round(bitmap.height * scale))
   const canvas = document.createElement('canvas')
