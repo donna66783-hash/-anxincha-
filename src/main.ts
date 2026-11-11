@@ -205,6 +205,7 @@ const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrls: string[] = []
 let ocrWorkerPromise: Promise<Worker> | null = null
+let ocrWorkerLanguageMode: 'full' | 'english' = 'full'
 let analysisContext: AnalysisContext = { source: 'text' }
 let batchProgressPrefix = ''
 
@@ -257,6 +258,7 @@ function renderImageThumbnails(files: File[]) {
 
 async function getOcrWorker() {
   if (!ocrWorkerPromise) {
+    ocrWorkerLanguageMode = 'full'
     ocrWorkerPromise = import('tesseract.js').then(({ createWorker }) => createWorker(['chi_tra', 'eng'], undefined, {
       logger: ({ progress, status }) => updateOcrProgress(progress, status),
     }))
@@ -267,6 +269,7 @@ async function getOcrWorker() {
 async function releaseOcrWorker() {
   const pendingWorker = ocrWorkerPromise
   ocrWorkerPromise = null
+  ocrWorkerLanguageMode = 'full'
   if (pendingWorker) await pendingWorker.then((worker) => worker.terminate()).catch(() => undefined)
 }
 
@@ -322,13 +325,17 @@ async function recognizeScreenshot(file: File) {
   const prepared = await prepareOcrImage(file)
   const qrDataPromise = decodeQrCode(prepared.image).catch(() => '')
   const worker = await getOcrWorker()
-  await worker.reinitialize('chi_tra+eng')
+  if (ocrWorkerLanguageMode !== 'full') {
+    await worker.reinitialize('chi_tra+eng')
+    ocrWorkerLanguageMode = 'full'
+  }
   const full = await worker.recognize(prepared.image)
   let urlText = ''
   ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
   try {
     const { PSM } = await import('tesseract.js')
     await worker.reinitialize('eng')
+    ocrWorkerLanguageMode = 'english'
     await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
     const top = await worker.recognize(prepared.image, {
       rectangle: { left: 0, top: 0, width: prepared.width, height: Math.max(1, Math.round(prepared.height * 0.20)) },
@@ -572,8 +579,18 @@ imageInput.addEventListener('change', async () => {
         const recognized = await recognizeScreenshot(file)
         if (!recognized.text.trim()) throw new Error('沒有辨識到文字')
         recognizedItems.push({ ...recognized, order: index + 1 })
-      } catch {
-        failedCount += 1
+      } catch (firstError) {
+        await releaseOcrWorker()
+        batchProgressPrefix = `第 ${index + 1}/${selectedFiles.length} 張重試：`
+        ocrStatus.textContent = `${batchProgressPrefix}重新啟動本機辨識引擎`
+        try {
+          const recognized = await recognizeScreenshot(file)
+          if (!recognized.text.trim()) throw new Error('沒有辨識到文字')
+          recognizedItems.push({ ...recognized, order: index + 1 })
+        } catch (retryError) {
+          failedCount += 1
+          console.warn('Screenshot OCR failed after one retry', { firstError, retryError })
+        }
       }
     }
     await releaseOcrWorker()
