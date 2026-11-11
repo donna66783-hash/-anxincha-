@@ -102,6 +102,18 @@ describe('analyzeContent', () => {
     expect(result.summary).toContain('無法充分判斷')
   })
 
+  it('records a partially failed multi-image scan without discarding detected risk', () => {
+    const result = analyzeContent('請填寫姓名電話完成登記', undefined, undefined, {
+      source: 'image',
+      imageCount: 3,
+      ocrCompletedCount: 2,
+      ocrFailedCount: 1,
+      ocrConfidence: 82,
+    })
+    expect(result.state).toBe('SUSPICIOUS')
+    expect(result.findings.some((finding) => finding.title.includes('部分截圖'))).toBe(true)
+  })
+
   it('uses suspicious state for a weak but known signal', () => {
     const result = analyzeContent('請加 LINE：abc123')
     expect(result.state).toBe('SUSPICIOUS')

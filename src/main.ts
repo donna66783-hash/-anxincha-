@@ -63,9 +63,9 @@ app.innerHTML = `
         <div class="input-footer">
           <div class="file-actions" aria-label="匯入內容">
             <label class="file-button image-button" for="image-input">
-              <span aria-hidden="true">▧</span> 上傳截圖辨識
+              <span aria-hidden="true">▧</span> 上傳多張截圖辨識
             </label>
-            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" />
+            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple />
             <label class="file-button" for="file-input">
               <span aria-hidden="true">＋</span> 匯入 LINE .txt
             </label>
@@ -76,7 +76,7 @@ app.innerHTML = `
         </div>
 
         <div class="image-preview" id="image-preview" hidden>
-          <img id="preview-image" alt="待辨識的截圖預覽" />
+          <div class="image-thumbnails" id="image-thumbnails" aria-label="待辨識的截圖預覽"></div>
           <div class="ocr-details">
             <div class="ocr-heading"><strong id="ocr-title">準備辨識截圖</strong><span id="ocr-percent">0%</span></div>
             <div class="progress-track" role="progressbar" aria-label="截圖文字辨識進度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="ocr-progress"></span></div>
@@ -192,7 +192,7 @@ const fileInput = document.querySelector<HTMLInputElement>('#file-input')!
 const imageInput = document.querySelector<HTMLInputElement>('#image-input')!
 const fileName = document.querySelector<HTMLSpanElement>('#file-name')!
 const imagePreview = document.querySelector<HTMLElement>('#image-preview')!
-const previewImage = document.querySelector<HTMLImageElement>('#preview-image')!
+const imageThumbnails = document.querySelector<HTMLElement>('#image-thumbnails')!
 const ocrTitle = document.querySelector<HTMLElement>('#ocr-title')!
 const ocrPercent = document.querySelector<HTMLElement>('#ocr-percent')!
 const ocrStatus = document.querySelector<HTMLElement>('#ocr-status')!
@@ -203,9 +203,10 @@ const scanButton = document.querySelector<HTMLButtonElement>('#scan-button')!
 const semanticToggle = document.querySelector<HTMLInputElement>('#semantic-toggle')!
 const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
-let previewUrl = ''
+let previewUrls: string[] = []
 let ocrWorkerPromise: Promise<Worker> | null = null
 let analysisContext: AnalysisContext = { source: 'text' }
+let batchProgressPrefix = ''
 
 function updateCounter() {
   counter.textContent = `${input.value.length.toLocaleString('zh-TW')} / 12,000`
@@ -223,16 +224,35 @@ function updateOcrProgress(progress: number, status: string) {
   ocrPercent.textContent = `${percent}%`
   ocrProgress.style.width = `${percent}%`
   progressTrack.setAttribute('aria-valuenow', String(percent))
-  ocrStatus.textContent = statusLabels[status] ?? '正在準備文字辨識…'
+  ocrStatus.textContent = `${batchProgressPrefix}${statusLabels[status] ?? '正在準備文字辨識…'}`
 }
 
 function resetImageUpload() {
   imageInput.value = ''
   imagePreview.hidden = true
-  if (previewUrl) URL.revokeObjectURL(previewUrl)
-  previewUrl = ''
-  previewImage.removeAttribute('src')
+  previewUrls.forEach((url) => URL.revokeObjectURL(url))
+  previewUrls = []
+  imageThumbnails.replaceChildren()
+  batchProgressPrefix = ''
   updateOcrProgress(0, '')
+}
+
+function renderImageThumbnails(files: File[]) {
+  previewUrls.forEach((url) => URL.revokeObjectURL(url))
+  previewUrls = []
+  imageThumbnails.replaceChildren()
+  files.forEach((file, index) => {
+    const url = URL.createObjectURL(file)
+    previewUrls.push(url)
+    const figure = document.createElement('figure')
+    const image = document.createElement('img')
+    const caption = document.createElement('figcaption')
+    image.src = url
+    image.alt = `第 ${index + 1} 張待辨識截圖`
+    caption.textContent = `${index + 1}`
+    figure.append(image, caption)
+    imageThumbnails.append(figure)
+  })
 }
 
 async function getOcrWorker() {
@@ -302,6 +322,7 @@ async function recognizeScreenshot(file: File) {
   const prepared = await prepareOcrImage(file)
   const qrDataPromise = decodeQrCode(prepared.image).catch(() => '')
   const worker = await getOcrWorker()
+  await worker.reinitialize('chi_tra+eng')
   const full = await worker.recognize(prepared.image)
   let urlText = ''
   ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
@@ -417,7 +438,7 @@ function renderEvidencePanel(result: AnalysisResult) {
         ? '使用者已關閉本機語意模型。'
         : '本機語意模型無法載入。'
   const ocrRow = result.context.source === 'image'
-    ? `<li><strong>截圖文字與 QR 擷取</strong><span>${result.context.ocrFailure ? `辨識失敗：${escapeHtml(result.context.ocrFailure)}` : `OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · 擷取 ${result.context.ocrTextLength ?? 0} 字 · ${result.context.ocrPasses === 2 ? '完整畫面＋網址列加強辨識' : '完整畫面辨識'} · QR ${result.context.qrCodeCount ?? 0} 個 · ${result.context.imageWidth ?? '?'}×${result.context.imageHeight ?? '?'} · ${escapeHtml(result.context.ocrEngine ?? 'OCR 引擎未知')}`}；QR 只在本機解碼並比對字串，不會自動開啟；信心值不是詐騙機率。</span></li>`
+    ? `<li><strong>截圖文字與 QR 擷取</strong><span>${result.context.ocrFailure ? `辨識失敗：${escapeHtml(result.context.ocrFailure)}` : `${result.context.imageCount ?? 1} 張中完成 ${result.context.ocrCompletedCount ?? 1} 張${result.context.ocrFailedCount ? `、失敗 ${result.context.ocrFailedCount} 張` : ''} · 平均 OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · 擷取 ${result.context.ocrTextLength ?? 0} 字 · ${result.context.ocrPasses ?? 0} 次辨識 · QR ${result.context.qrCodeCount ?? 0} 個 · ${escapeHtml(result.context.ocrEngine ?? 'OCR 引擎未知')}`}；圖片依選取順序逐張處理，QR 只在本機解碼並比對字串，不會自動開啟；信心值不是詐騙機率。</span></li>`
     : `<li><strong>輸入內容</strong><span>${result.context.source === 'file' ? '由文字檔匯入' : '由使用者貼上'}，直接進行本機比對。</span></li>`
   const officialReferences = [...new Map(result.findings
     .filter((finding) => finding.source)
@@ -509,49 +530,77 @@ fileInput.addEventListener('change', async () => {
 removeImageButton.addEventListener('click', resetImageUpload)
 
 imageInput.addEventListener('change', async () => {
-  const file = imageInput.files?.[0]
-  if (!file) return
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+  const selectedFiles = Array.from(imageInput.files ?? [])
+  if (!selectedFiles.length) return
+  if (selectedFiles.length > 10) {
+    fileName.textContent = '一次最多選擇 10 張截圖，請分批處理。'
+    resetImageUpload()
+    return
+  }
+  if (selectedFiles.some((file) => !['image/png', 'image/jpeg', 'image/webp'].includes(file.type))) {
     fileName.textContent = '僅支援 PNG、JPG 或 WebP 圖片。'
     resetImageUpload()
     return
   }
-  if (file.size > 20_000_000) {
-    fileName.textContent = '圖片超過 20 MB，請先在手機裁切或縮小後再試。'
+  if (selectedFiles.some((file) => file.size > 20_000_000)) {
+    fileName.textContent = '每張圖片上限 20 MB，請先在手機裁切或縮小後再試。'
+    resetImageUpload()
+    return
+  }
+  if (selectedFiles.reduce((total, file) => total + file.size, 0) > 80_000_000) {
+    fileName.textContent = '本批圖片總大小超過 80 MB，請分成兩批處理。'
     resetImageUpload()
     return
   }
 
-  if (previewUrl) URL.revokeObjectURL(previewUrl)
-  previewUrl = URL.createObjectURL(file)
-  previewImage.src = previewUrl
+  renderImageThumbnails(selectedFiles)
   imagePreview.hidden = false
   fileName.textContent = ''
-  ocrTitle.textContent = `辨識中：${file.name}`
+  ocrTitle.textContent = `準備辨識 ${selectedFiles.length} 張截圖`
   updateOcrProgress(0, '')
   imageInput.disabled = true
   scanButton.disabled = true
 
   try {
-    const recognized = await recognizeScreenshot(file)
+    const recognizedItems: (Awaited<ReturnType<typeof recognizeScreenshot>> & { order: number })[] = []
+    let failedCount = 0
+    for (const [index, file] of selectedFiles.entries()) {
+      batchProgressPrefix = `第 ${index + 1}/${selectedFiles.length} 張：`
+      ocrTitle.textContent = `辨識中：第 ${index + 1} 張，共 ${selectedFiles.length} 張`
+      updateOcrProgress(0, '')
+      try {
+        const recognized = await recognizeScreenshot(file)
+        if (!recognized.text.trim()) throw new Error('沒有辨識到文字')
+        recognizedItems.push({ ...recognized, order: index + 1 })
+      } catch {
+        failedCount += 1
+      }
+    }
     await releaseOcrWorker()
-    const recognizedText = recognized.text.trim()
+    const recognizedText = recognizedItems
+      .map((recognized) => `[截圖 ${recognized.order}/${selectedFiles.length}]\n${recognized.text.trim()}`)
+      .join('\n\n')
     if (!recognizedText) throw new Error('沒有辨識到文字')
-    input.value = recognizedText.slice(0, 12000)
+    const averageConfidence = recognizedItems.reduce((sum, item) => sum + item.confidence, 0) / recognizedItems.length
     analysisContext = {
       source: 'image',
-      ocrConfidence: recognized.confidence,
-      ocrPasses: recognized.passes,
+      ocrConfidence: averageConfidence,
+      ocrPasses: recognizedItems.reduce((sum, item) => sum + item.passes, 0),
       ocrTextLength: recognizedText.length,
-      ocrEngine: recognized.engine,
-      imageWidth: recognized.width,
-      imageHeight: recognized.height,
-      qrCodeCount: recognized.qrCodeCount,
+      ocrEngine: recognizedItems[0]?.engine ?? 'Tesseract.js 7',
+      imageCount: selectedFiles.length,
+      ocrCompletedCount: recognizedItems.length,
+      ocrFailedCount: failedCount,
+      qrCodeCount: recognizedItems.reduce((sum, item) => sum + item.qrCodeCount, 0),
     }
+    input.value = recognizedText.slice(0, 12000)
     updateCounter()
+    batchProgressPrefix = ''
     updateOcrProgress(1, 'recognizing text')
-    ocrTitle.textContent = '截圖文字辨識完成'
-    ocrStatus.textContent = '文字已填入下方內容並開始比對；你也可以先修改辨識結果。'
+    ocrTitle.textContent = `${recognizedItems.length} 張截圖辨識完成`
+    ocrStatus.textContent = failedCount
+      ? `其中 ${failedCount} 張未能辨識；已合併其他圖片文字並開始比對。`
+      : '已依選取順序合併文字並開始比對；你也可以先修改辨識結果。'
     await runScan()
   } catch (error) {
     await releaseOcrWorker()
@@ -559,13 +608,14 @@ imageInput.addEventListener('change', async () => {
     const failureReason = error instanceof Error && error.message === '沒有辨識到文字'
       ? '圖片中沒有辨識到文字'
       : '文字辨識途中中斷'
-    analysisContext = { source: 'image', ocrConfidence: 0, ocrPasses: 0, ocrTextLength: 0, ocrEngine: 'Tesseract.js 7', ocrFailure: failureReason }
+    analysisContext = { source: 'image', imageCount: selectedFiles.length, ocrCompletedCount: 0, ocrFailedCount: selectedFiles.length, ocrConfidence: 0, ocrPasses: 0, ocrTextLength: 0, ocrEngine: 'Tesseract.js 7', ocrFailure: failureReason }
     ocrTitle.textContent = '截圖辨識失敗'
     ocrStatus.textContent = failureReason === '圖片中沒有辨識到文字'
       ? '圖片中沒有辨識到文字，請換一張清晰、字體較大的截圖。'
       : '辨識途中中斷，請直接重新選擇同一張圖片再試。圖片並未上傳；首次使用請保持網路連線。'
     renderResult(analyzeContent('', undefined, undefined, analysisContext))
   } finally {
+    batchProgressPrefix = ''
     imageInput.disabled = false
     scanButton.disabled = false
   }

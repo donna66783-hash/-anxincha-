@@ -33,6 +33,9 @@ export interface AnalysisContext {
   ocrPasses?: number
   ocrTextLength?: number
   ocrEngine?: string
+  imageCount?: number
+  ocrCompletedCount?: number
+  ocrFailedCount?: number
   imageWidth?: number
   imageHeight?: number
   qrCodeCount?: number
@@ -247,7 +250,10 @@ export function analyzeContent(
   }
 
   const imageEvidenceInsufficient = context.source === 'image'
-    && (Boolean(context.ocrFailure) || (context.ocrConfidence ?? 0) < 60 || findings.length === 0)
+    && (Boolean(context.ocrFailure)
+      || (context.ocrCompletedCount ?? 1) === 0
+      || (context.ocrConfidence ?? 0) < 60
+      || findings.length === 0)
 
   if (context.source === 'image' && context.ocrFailure) {
     findings.push({
@@ -259,6 +265,12 @@ export function analyzeContent(
     findings.push({
       title: '截圖文字辨識可信度不足',
       detail: '部分文字可能沒有被正確讀取，因此不能把「未命中」視為安全，建議核對辨識文字或換清晰截圖。',
+      weight: 0,
+    })
+  } else if (context.source === 'image' && (context.ocrFailedCount ?? 0) > 0) {
+    findings.push({
+      title: '部分截圖沒有完成辨識',
+      detail: `共有 ${context.imageCount ?? 0} 張截圖，其中 ${context.ocrFailedCount} 張未能讀取；目前結果只根據成功辨識的內容，請另外補傳失敗的截圖。`,
       weight: 0,
     })
   } else if (context.source === 'image' && findings.length === 0) {

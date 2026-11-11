@@ -66,9 +66,12 @@ textarea[aria-invalid="true"] { border-color: #b6372e; }
 .file-button:hover { text-decoration: underline; }
 #file-input, #image-input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
 #file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.image-preview { display: grid; grid-template-columns: 128px 1fr; gap: 1rem; align-items: center; margin: 1rem 0 0; padding: 1rem; border: 1px solid #d9e7e1; border-radius: 8px; background: #f8fbfa; }
+.image-preview { display: grid; grid-template-columns: minmax(128px, 220px) 1fr; gap: 1rem; align-items: center; margin: 1rem 0 0; padding: 1rem; border: 1px solid #d9e7e1; border-radius: 8px; background: #f8fbfa; }
 .image-preview[hidden] { display: none; }
-.image-preview img { width: 128px; height: 104px; object-fit: contain; border-radius: 5px; background: #e8efec; }
+.image-thumbnails { display: grid; grid-template-columns: repeat(auto-fit, minmax(56px, 1fr)); gap: .45rem; max-height: 164px; overflow: auto; }
+.image-thumbnails figure { position: relative; margin: 0; min-width: 0; }
+.image-thumbnails img { display: block; width: 100%; height: 72px; object-fit: cover; border-radius: 5px; background: #e8efec; }
+.image-thumbnails figcaption { position: absolute; right: .25rem; bottom: .25rem; min-width: 1.35rem; padding: .1rem .35rem; border-radius: 999px; background: rgba(10, 63, 47, .88); color: #fff; font-size: .72rem; font-weight: 800; text-align: center; }
 .ocr-details { min-width: 0; }
 .ocr-heading { display: flex; justify-content: space-between; gap: 1rem; color: var(--ink); }
 .ocr-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -233,8 +236,9 @@ footer { padding: 3rem clamp(1.5rem, 8vw, 8rem); display: grid; grid-template-co
   .input-footer { align-items: flex-start; gap: .5rem; }
   .file-actions { display: block; }
   .file-actions .file-button { display: inline-block; margin: 0 .55rem .45rem 0; }
-  .image-preview { grid-template-columns: 82px 1fr; padding: .75rem; }
-  .image-preview img { width: 82px; height: 82px; }
+  .image-preview { grid-template-columns: 1fr; padding: .75rem; }
+  .image-thumbnails { grid-template-columns: repeat(4, minmax(54px, 1fr)); max-height: 150px; }
+  .image-thumbnails img { height: 66px; }
   #file-name { display: block; max-width: 210px; margin-top: .3rem; }
   .result-wrap { padding-inline: .75rem; }
   .result-summary { grid-template-columns: auto 1fr; padding: 1.5rem; }
