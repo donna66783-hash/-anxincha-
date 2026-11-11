@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",
+    "jsqr": "^1.4.0",
     "tesseract.js": "^7.0.0"
   }
 }

@@ -1,6 +1,6 @@
 import './styles.css'
 import type { Worker } from 'tesseract.js'
-import { analyzeContent, type AnalysisContext, type AnalysisResult, type RiskLevel } from './analyzer'
+import { analyzeContent, type AnalysisContext, type AnalysisResult, type DecisionState } from './analyzer'
 import { searchCommunityDatabase, type CommunitySearchResult } from './community-db'
 import { searchSemanticSimilarity, type SemanticProgress, type SemanticSearchResult } from './semantic-analyzer'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
@@ -277,8 +277,30 @@ async function prepareOcrImage(file: File) {
   return { image: image ?? file, width, height }
 }
 
+async function decodeQrCode(image: Blob) {
+  const bitmap = await createImageBitmap(image)
+  const maxDimension = 1400
+  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height))
+  const width = Math.max(1, Math.round(bitmap.width * scale))
+  const height = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true })
+  if (!context) {
+    bitmap.close()
+    return ''
+  }
+  context.drawImage(bitmap, 0, 0, width, height)
+  bitmap.close()
+  const pixels = context.getImageData(0, 0, width, height)
+  const { default: jsQR } = await import('jsqr')
+  return jsQR(pixels.data, width, height, { inversionAttempts: 'attemptBoth' })?.data.trim() ?? ''
+}
+
 async function recognizeScreenshot(file: File) {
   const prepared = await prepareOcrImage(file)
+  const qrDataPromise = decodeQrCode(prepared.image).catch(() => '')
   const worker = await getOcrWorker()
   const full = await worker.recognize(prepared.image)
   let urlText = ''
@@ -294,22 +316,32 @@ async function recognizeScreenshot(file: File) {
   } catch {
     // The full-image OCR result remains usable if the URL-focused pass is unsupported.
   }
-  const text = [full.data.text.trim(), urlText].filter(Boolean).join('\n')
-  return { text, confidence: full.data.confidence, passes: urlText ? 2 : 1 }
+  const qrData = await qrDataPromise
+  const text = [full.data.text.trim(), urlText, qrData ? `QR:${qrData}` : ''].filter(Boolean).join('\n')
+  return {
+    text,
+    confidence: full.data.confidence,
+    passes: urlText ? 2 : 1,
+    width: prepared.width,
+    height: prepared.height,
+    engine: 'Tesseract.js 7',
+    qrCodeCount: qrData ? 1 : 0,
+  }
 }
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>'\"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]!)
 }
 
-const levelCopy: Record<RiskLevel, { label: string; icon: string }> = {
-  high: { label: '高度風險', icon: '!' },
-  medium: { label: '需要注意', icon: '?' },
-  low: { label: '暫無明顯警訊', icon: '✓' },
+const stateCopy: Record<DecisionState, { label: string; icon: string }> = {
+  HIGH_RISK: { label: '高度風險', icon: '!' },
+  SUSPICIOUS: { label: '可疑，請先查證', icon: '?' },
+  NO_KNOWN_SIGNALS: { label: '未發現已知特徵', icon: '—' },
+  INSUFFICIENT_EVIDENCE: { label: '無法充分判斷', icon: '?' },
 }
 
 function renderResult(result: AnalysisResult) {
-  const copy = levelCopy[result.level]
+  const copy = stateCopy[result.state]
   const findings = result.findings.length
     ? result.findings.map((finding) => `<li><span>!</span><div><strong>${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.detail)}${finding.source ? ` <a href="${escapeHtml(finding.source.url)}" target="_blank" rel="noopener noreferrer">查看${escapeHtml(finding.source.name)} ↗</a>` : ''}</p></div></li>`).join('')
     : '<li class="no-finding"><span>✓</span><div><strong>未比對到常見高風險話術</strong><p>詐騙手法會持續變化，仍請確認對方身分與網址來源。</p></div></li>'
@@ -322,7 +354,7 @@ function renderResult(result: AnalysisResult) {
     <div class="result-card risk-${result.level}">
       <div class="result-summary">
         <div class="result-icon">${copy.icon}</div>
-        <div><p>檢查結果 · 證據分數 ${result.score}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
+        <div><p>檢查結果 · ${escapeHtml(result.state)} · 證據分數 ${result.score}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
         <span class="category">可能類型：${escapeHtml(result.category)}</span>
       </div>
       <div class="result-columns">
@@ -385,7 +417,7 @@ function renderEvidencePanel(result: AnalysisResult) {
         ? '使用者已關閉本機語意模型。'
         : '本機語意模型無法載入。'
   const ocrRow = result.context.source === 'image'
-    ? `<li><strong>截圖文字擷取</strong><span>OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · ${result.context.ocrPasses === 2 ? '完整畫面＋網址列加強辨識' : '完整畫面辨識'}；信心值不是詐騙機率。</span></li>`
+    ? `<li><strong>截圖文字與 QR 擷取</strong><span>${result.context.ocrFailure ? `辨識失敗：${escapeHtml(result.context.ocrFailure)}` : `OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · 擷取 ${result.context.ocrTextLength ?? 0} 字 · ${result.context.ocrPasses === 2 ? '完整畫面＋網址列加強辨識' : '完整畫面辨識'} · QR ${result.context.qrCodeCount ?? 0} 個 · ${result.context.imageWidth ?? '?'}×${result.context.imageHeight ?? '?'} · ${escapeHtml(result.context.ocrEngine ?? 'OCR 引擎未知')}`}；QR 只在本機解碼並比對字串，不會自動開啟；信心值不是詐騙機率。</span></li>`
     : `<li><strong>輸入內容</strong><span>${result.context.source === 'file' ? '由文字檔匯入' : '由使用者貼上'}，直接進行本機比對。</span></li>`
   const officialReferences = [...new Map(result.findings
     .filter((finding) => finding.source)
@@ -506,7 +538,16 @@ imageInput.addEventListener('change', async () => {
     const recognizedText = recognized.text.trim()
     if (!recognizedText) throw new Error('沒有辨識到文字')
     input.value = recognizedText.slice(0, 12000)
-    analysisContext = { source: 'image', ocrConfidence: recognized.confidence, ocrPasses: recognized.passes }
+    analysisContext = {
+      source: 'image',
+      ocrConfidence: recognized.confidence,
+      ocrPasses: recognized.passes,
+      ocrTextLength: recognizedText.length,
+      ocrEngine: recognized.engine,
+      imageWidth: recognized.width,
+      imageHeight: recognized.height,
+      qrCodeCount: recognized.qrCodeCount,
+    }
     updateCounter()
     updateOcrProgress(1, 'recognizing text')
     ocrTitle.textContent = '截圖文字辨識完成'
@@ -515,10 +556,15 @@ imageInput.addEventListener('change', async () => {
   } catch (error) {
     await releaseOcrWorker()
     imageInput.value = ''
+    const failureReason = error instanceof Error && error.message === '沒有辨識到文字'
+      ? '圖片中沒有辨識到文字'
+      : '文字辨識途中中斷'
+    analysisContext = { source: 'image', ocrConfidence: 0, ocrPasses: 0, ocrTextLength: 0, ocrEngine: 'Tesseract.js 7', ocrFailure: failureReason }
     ocrTitle.textContent = '截圖辨識失敗'
-    ocrStatus.textContent = error instanceof Error && error.message === '沒有辨識到文字'
+    ocrStatus.textContent = failureReason === '圖片中沒有辨識到文字'
       ? '圖片中沒有辨識到文字，請換一張清晰、字體較大的截圖。'
       : '辨識途中中斷，請直接重新選擇同一張圖片再試。圖片並未上傳；首次使用請保持網路連線。'
+    renderResult(analyzeContent('', undefined, undefined, analysisContext))
   } finally {
     imageInput.disabled = false
     scanButton.disabled = false

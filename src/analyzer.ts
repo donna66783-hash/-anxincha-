@@ -4,6 +4,7 @@ import type { SemanticSearchResult } from './semantic-analyzer'
 import { normalizeForMatching } from './text-normalizer'
 
 export type RiskLevel = 'low' | 'medium' | 'high'
+export type DecisionState = 'HIGH_RISK' | 'SUSPICIOUS' | 'NO_KNOWN_SIGNALS' | 'INSUFFICIENT_EVIDENCE'
 
 export interface Finding {
   title: string
@@ -13,6 +14,7 @@ export interface Finding {
 }
 
 export interface AnalysisResult {
+  state: DecisionState
   level: RiskLevel
   score: number
   category: string
@@ -29,6 +31,12 @@ export interface AnalysisContext {
   source?: 'text' | 'image' | 'file'
   ocrConfidence?: number
   ocrPasses?: number
+  ocrTextLength?: number
+  ocrEngine?: string
+  imageWidth?: number
+  imageHeight?: number
+  qrCodeCount?: number
+  ocrFailure?: string
 }
 
 interface Rule {
@@ -238,22 +246,42 @@ export function analyzeContent(
     })
   }
 
-  if (context.source === 'image' && (context.ocrConfidence ?? 0) < 60) {
+  const imageEvidenceInsufficient = context.source === 'image'
+    && (Boolean(context.ocrFailure) || (context.ocrConfidence ?? 0) < 60 || findings.length === 0)
+
+  if (context.source === 'image' && context.ocrFailure) {
+    findings.push({
+      title: '截圖無法充分辨識',
+      detail: `${context.ocrFailure}。本次不能據此判定未發現風險，請換一張較清晰、完整的截圖或直接貼上文字。`,
+      weight: 0,
+    })
+  } else if (context.source === 'image' && (context.ocrConfidence ?? 0) < 60) {
     findings.push({
       title: '截圖文字辨識可信度不足',
       detail: '部分文字可能沒有被正確讀取，因此不能把「未命中」視為安全，建議核對辨識文字或換清晰截圖。',
-      weight: 35,
+      weight: 0,
     })
   } else if (context.source === 'image' && findings.length === 0) {
     findings.push({
       title: '截圖未提供足夠資訊確認安全',
       detail: '圖片辨識可能遺漏關鍵內容；沒有網址或沒有命中案例，不代表對方可信。',
-      weight: 35,
+      weight: 0,
     })
   }
 
   const score = Math.min(100, findings.reduce((sum, finding) => sum + finding.weight, 0))
-  const level: RiskLevel = score >= 55 ? 'high' : score >= 25 ? 'medium' : 'low'
+  const state: DecisionState = database.matches.length > 0 || score >= 55
+    ? 'HIGH_RISK'
+    : imageEvidenceInsufficient
+      ? 'INSUFFICIENT_EVIDENCE'
+      : score > 0
+        ? 'SUSPICIOUS'
+        : 'NO_KNOWN_SIGNALS'
+  const level: RiskLevel = state === 'HIGH_RISK'
+    ? 'high'
+    : state === 'SUSPICIOUS' || state === 'INSUFFICIENT_EVIDENCE'
+      ? 'medium'
+      : 'low'
   const categoryCounts = matchedRules.reduce<Record<string, number>>((counts, rule) => {
     counts[rule.category] = (counts[rule.category] ?? 0) + rule.weight
     return counts
@@ -264,21 +292,23 @@ export function analyzeContent(
     ?? Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0]
     ?? '尚未辨識特定類型'
 
-  const summaries: Record<RiskLevel, string> = {
-    high: database.matches.length
+  const summaries: Record<DecisionState, string> = {
+    HIGH_RISK: database.matches.length
       ? '訊息中的網址已出現在政府公開涉詐資料，請勿開啟、登入或付款。'
       : community.matches.length
         ? '內容與已知社群詐騙案例的多項話術特徵相符，請停止提供資料或加入陌生群組。'
       : '出現多項高風險警訊，請先停止互動與付款。',
-    medium: '有可疑跡象，繼續操作前請先透過其他管道查證。',
-    low: '目前未發現明顯警訊，但這不代表內容一定安全。',
+    SUSPICIOUS: '發現一項或多項可疑跡象，繼續操作前請先透過其他管道查證。',
+    NO_KNOWN_SIGNALS: '在可辨識的內容中未發現已知警訊；這不代表內容一定安全。',
+    INSUFFICIENT_EVIDENCE: '圖片或文字證據不足，這次無法充分判斷，請補充較清晰或更完整的內容。',
   }
 
   return {
+    state,
     level,
     score,
     category,
-    summary: summaries[level],
+    summary: summaries[state],
     findings,
     database,
     community,

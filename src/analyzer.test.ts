@@ -12,6 +12,7 @@ describe('analyzeContent', () => {
   it('keeps ordinary messages low risk', () => {
     const result = analyzeContent('明天下午三點在圖書館見面，記得帶筆記。')
     expect(result.level).toBe('low')
+    expect(result.state).toBe('NO_KNOWN_SIGNALS')
     expect(result.score).toBe(0)
   })
 
@@ -79,13 +80,32 @@ describe('analyzeContent', () => {
   it('does not show a green result when screenshot OCR confidence is low', () => {
     const result = analyzeContent('晚點再聯絡', undefined, undefined, { source: 'image', ocrConfidence: 42 })
     expect(result.level).toBe('medium')
+    expect(result.state).toBe('INSUFFICIENT_EVIDENCE')
     expect(result.findings.some((finding) => finding.title.includes('可信度不足'))).toBe(true)
   })
 
   it('uses a cautious result for an otherwise unmatched screenshot', () => {
     const result = analyzeContent('明天下午三點見面', undefined, undefined, { source: 'image', ocrConfidence: 91 })
     expect(result.level).toBe('medium')
+    expect(result.state).toBe('INSUFFICIENT_EVIDENCE')
     expect(result.findings.some((finding) => finding.title.includes('足夠資訊'))).toBe(true)
+  })
+
+  it('returns insufficient evidence when screenshot OCR fails', () => {
+    const result = analyzeContent('', undefined, undefined, {
+      source: 'image',
+      ocrConfidence: 0,
+      ocrFailure: '圖片中沒有辨識到文字',
+    })
+    expect(result.state).toBe('INSUFFICIENT_EVIDENCE')
+    expect(result.score).toBe(0)
+    expect(result.summary).toContain('無法充分判斷')
+  })
+
+  it('uses suspicious state for a weak but known signal', () => {
+    const result = analyzeContent('請加 LINE：abc123')
+    expect(result.state).toBe('SUSPICIOUS')
+    expect(result.level).toBe('medium')
   })
 
   it('uses a local semantic match when fixed keywords do not match', () => {
