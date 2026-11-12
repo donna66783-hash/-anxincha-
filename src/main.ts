@@ -6,6 +6,7 @@ import { searchSemanticSimilarity, type SemanticProgress, type SemanticSearchRes
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
 import { reportApiUrl as configuredReportApiUrl } from './config'
 import { deduplicateConversationTexts, selectStrongestImageResult } from './image-batch'
+import { effectiveImageText, type CorrectionStatus, type ImageTextSource, type SupplementScope } from './image-analysis-state'
 
 const examples = {
   police: '您好，我是檢察官。您的帳戶涉及洗錢，偵查不公開，不能告訴家人。請今天內把存款匯到監管帳戶配合調查。',
@@ -87,8 +88,17 @@ app.innerHTML = `
             <div class="progress-track" role="progressbar" aria-label="截圖文字辨識進度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="ocr-progress"></span></div>
             <p id="ocr-status" aria-live="polite">圖片只會在這台裝置處理，不會上傳。</p>
             <label class="conversation-option"><input type="checkbox" id="same-conversation" /> 這些截圖屬於同一段對話（才會跨圖整合）</label>
-            <div class="ocr-actions"><button type="button" class="start-ocr" id="start-ocr-button">開始辨識所選截圖</button><button type="button" class="remove-image" id="remove-image">移除截圖</button></div>
+            <div class="ocr-actions"><button type="button" class="start-ocr" id="start-ocr-button">開始辨識所選截圖</button><button type="button" class="cancel-ocr" id="cancel-ocr-button" hidden>中止辨識</button><button type="button" class="remove-image" id="remove-image">移除截圖</button></div>
           </div>
+        </div>
+
+        <div class="supplement-panel">
+          <label for="supplement-text"><strong>補充貼文或對話文字（選填）</strong><span>如果截圖不清楚，可貼上 Facebook 貼文內容、LINE 對話或對方說過的話。</span></label>
+          <textarea id="supplement-text" maxlength="6000" placeholder="只會在本機分析，不會自動上傳。"></textarea>
+          <label for="supplement-scope">這段文字適用於
+            <select id="supplement-scope"><option value="background">獨立背景說明（預設）</option><option value="conversation" disabled>同一段對話的整組補充文字</option></select>
+          </label>
+          <p id="supplement-hint">預設不會套用到所有圖片；選擇圖片後可指定單一截圖。</p>
         </div>
 
         <div class="quick-examples">
@@ -206,7 +216,10 @@ const ocrProgress = document.querySelector<HTMLElement>('#ocr-progress')!
 const progressTrack = document.querySelector<HTMLElement>('.progress-track')!
 const removeImageButton = document.querySelector<HTMLButtonElement>('#remove-image')!
 const startOcrButton = document.querySelector<HTMLButtonElement>('#start-ocr-button')!
+const cancelOcrButton = document.querySelector<HTMLButtonElement>('#cancel-ocr-button')!
 const sameConversationInput = document.querySelector<HTMLInputElement>('#same-conversation')!
+const supplementTextInput = document.querySelector<HTMLTextAreaElement>('#supplement-text')!
+const supplementScopeInput = document.querySelector<HTMLSelectElement>('#supplement-scope')!
 const scanButton = document.querySelector<HTMLButtonElement>('#scan-button')!
 const semanticToggle = document.querySelector<HTMLInputElement>('#semantic-toggle')!
 const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
@@ -218,8 +231,20 @@ let ocrWorkerLanguageMode: 'full' | 'english' = 'full'
 let analysisContext: AnalysisContext = { source: 'text' }
 let batchProgressPrefix = ''
 let imagesSameConversation = false
+let ocrCancelled = false
+let supplementalAnalysis: { text: string; scope: SupplementScope; targetIndex?: number; result?: AnalysisResult } | null = null
+
+interface OcrCandidateResult {
+  label: string
+  confidence: number
+  text: string
+  characters: number
+  durationMs: number
+}
 
 interface ImageAnalysisItem {
+  imageId: string
+  imageIndex: number
   order: number
   fileName: string
   text: string
@@ -231,6 +256,14 @@ interface ImageAnalysisItem {
   qrCodeCount: number
   result: AnalysisResult
   failure?: string
+  ocrOriginalText: string
+  userCorrectedText: string
+  correctionStatus: CorrectionStatus
+  textSource: ImageTextSource
+  supplementalText?: string
+  candidates: OcrCandidateResult[]
+  processingMs: number
+  stableCandidateCount: number
 }
 
 let imageAnalysisItems: ImageAnalysisItem[] = []
@@ -262,10 +295,25 @@ function resetImageUpload() {
   selectedImageFiles = []
   imageAnalysisItems = []
   imagesSameConversation = false
+  supplementalAnalysis = null
   sameConversationInput.checked = false
   imageThumbnails.replaceChildren()
+  updateSupplementTargets()
   batchProgressPrefix = ''
   updateOcrProgress(0, '')
+}
+
+function updateSupplementTargets() {
+  const previous = supplementScopeInput.value
+  supplementScopeInput.querySelectorAll('option[data-image-option]').forEach((option) => option.remove())
+  selectedImageFiles.forEach((_, index) => {
+    const option = document.createElement('option')
+    option.value = `image-${index + 1}`
+    option.dataset.imageOption = 'true'
+    option.textContent = `只套用到第 ${index + 1} 張截圖`
+    supplementScopeInput.append(option)
+  })
+  if ([...supplementScopeInput.options].some((option) => option.value === previous)) supplementScopeInput.value = previous
 }
 
 function renderImageThumbnails(files: File[], allowReorder = true) {
@@ -330,25 +378,70 @@ async function releaseOcrWorker() {
   if (pendingWorker) await pendingWorker.then((worker) => worker.terminate()).catch(() => undefined)
 }
 
-async function prepareOcrImage(file: File) {
-  const bitmap = await createImageBitmap(file)
-  const maxDimension = 1800
-  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height))
-  const width = Math.max(1, Math.round(bitmap.width * scale))
-  const height = Math.max(1, Math.round(bitmap.height * scale))
+async function canvasCandidate(
+  bitmap: ImageBitmap,
+  label: string,
+  source: { x: number; y: number; width: number; height: number },
+  target: { width: number; height: number },
+  mode: 'color' | 'contrast' = 'color',
+) {
   const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext('2d', { alpha: false })
-  if (!context) {
-    const dimensions = { width: bitmap.width, height: bitmap.height }
-    bitmap.close()
-    return { image: file as Blob, ...dimensions }
+  canvas.width = target.width
+  canvas.height = target.height
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: mode === 'contrast' })
+  if (!context) throw new Error('瀏覽器無法建立圖片處理畫布')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(bitmap, source.x, source.y, source.width, source.height, 0, 0, target.width, target.height)
+  if (mode === 'contrast') {
+    const pixels = context.getImageData(0, 0, target.width, target.height)
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      const luminance = 0.299 * pixels.data[index]! + 0.587 * pixels.data[index + 1]! + 0.114 * pixels.data[index + 2]!
+      const adjusted = Math.max(0, Math.min(255, (luminance - 128) * 1.55 + 128))
+      pixels.data[index] = pixels.data[index + 1] = pixels.data[index + 2] = adjusted
+    }
+    context.putImageData(pixels, 0, 0)
   }
-  context.drawImage(bitmap, 0, 0, width, height)
-  bitmap.close()
   const image = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
-  return { image: image ?? file, width, height }
+  if (!image) throw new Error('圖片前處理失敗')
+  return { image, label, width: target.width, height: target.height }
+}
+
+async function prepareOcrCandidates(file: File) {
+  const bitmap = await createImageBitmap(file)
+  const width = bitmap.width
+  const height = bitmap.height
+  const maxPixels = 12_000_000
+  const baseScale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, width * height)))
+  const candidates: Array<{ image: Blob; label: string; width: number; height: number }> = []
+  const maxDimension = Math.max(width, height)
+  const fullSource = { x: 0, y: 0, width, height }
+  try {
+    if (baseScale < 1) {
+      const target = { width: Math.round(width * baseScale), height: Math.round(height * baseScale) }
+      candidates.push(await canvasCandidate(bitmap, '原圖等比例限制（1200 萬像素）', fullSource, target))
+    } else {
+      candidates.push({ image: file, label: '原始圖片', width, height })
+    }
+    if (maxDimension < 900) {
+      const scale = Math.min(3, 2200 / maxDimension)
+      const target = { width: Math.round(width * scale), height: Math.round(height * scale) }
+      candidates.push(await canvasCandidate(bitmap, `自適應放大 ${scale.toFixed(1)}×`, fullSource, target))
+      candidates.push(await canvasCandidate(bitmap, '放大＋灰階對比', fullSource, target, 'contrast'))
+    } else if (height / width > 2.1 || height > 2200) {
+      const segmentHeight = Math.min(height, Math.max(width * 1.35, 1100))
+      const starts = [0, Math.max(0, height - segmentHeight)]
+      for (const [index, start] of [...new Set(starts.map(Math.round))].entries()) {
+        const cropHeight = Math.min(segmentHeight, height - start)
+        candidates.push(await canvasCandidate(bitmap, `長圖分段 ${index + 1}`, { x: 0, y: start, width, height: cropHeight }, { width, height: Math.round(cropHeight) }))
+      }
+    } else {
+      candidates.push(await canvasCandidate(bitmap, '灰階對比增強', fullSource, { width, height }, 'contrast'))
+    }
+  } finally {
+    bitmap.close()
+  }
+  return candidates.slice(0, 3)
 }
 
 async function decodeQrCode(image: Blob) {
@@ -373,38 +466,54 @@ async function decodeQrCode(image: Blob) {
 }
 
 async function recognizeScreenshot(file: File) {
-  const prepared = await prepareOcrImage(file)
-  const qrDataPromise = decodeQrCode(prepared.image).catch(() => '')
+  const startedAt = performance.now()
+  const candidates = await prepareOcrCandidates(file)
+  const qrDataPromise = decodeQrCode(candidates[0]!.image).catch(() => '')
   const worker = await getOcrWorker()
   if (ocrWorkerLanguageMode !== 'full') {
     await worker.reinitialize('chi_tra+eng')
     ocrWorkerLanguageMode = 'full'
   }
-  const full = await worker.recognize(prepared.image)
-  let urlText = ''
-  ocrStatus.textContent = '正在加強辨識圖片上方的網址與帳號…'
-  try {
-    const { PSM } = await import('tesseract.js')
-    await worker.reinitialize('eng')
-    ocrWorkerLanguageMode = 'english'
-    await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
-    const top = await worker.recognize(prepared.image, {
-      rectangle: { left: 0, top: 0, width: prepared.width, height: Math.max(1, Math.round(prepared.height * 0.20)) },
+  const candidateResults: OcrCandidateResult[] = []
+  const { PSM } = await import('tesseract.js')
+  for (const [index, candidate] of candidates.entries()) {
+    if (ocrCancelled) throw new Error('使用者已取消辨識')
+    ocrStatus.textContent = `${batchProgressPrefix}${candidate.label}（${index + 1}/${candidates.length}）`
+    await worker.setParameters({ tessedit_pageseg_mode: index === 0 ? PSM.AUTO : PSM.SPARSE_TEXT })
+    const candidateStartedAt = performance.now()
+    const recognized = await worker.recognize(candidate.image)
+    const text = recognized.data.text.trim()
+    candidateResults.push({
+      label: candidate.label,
+      confidence: recognized.data.confidence,
+      text,
+      characters: text.replace(/\s/g, '').length,
+      durationMs: Math.round(performance.now() - candidateStartedAt),
     })
-    urlText = top.data.text.trim()
-  } catch {
-    // The full-image OCR result remains usable if the URL-focused pass is unsupported.
   }
   const qrData = await qrDataPromise
-  const text = [full.data.text.trim(), urlText, qrData ? `QR:${qrData}` : ''].filter(Boolean).join('\n')
+  const best = [...candidateResults].sort((left, right) =>
+    (right.confidence + Math.min(10, right.characters / 60)) - (left.confidence + Math.min(10, left.characters / 60)),
+  )[0]!
+  const urlCandidates = [...new Set(candidateResults.flatMap((candidate) => candidate.text.match(/https?:\/\/[^\s<>"']+/gi) ?? []))]
+  const text = [best.text, ...urlCandidates.filter((url) => !best.text.includes(url)), qrData ? `QR:${qrData}` : ''].filter(Boolean).join('\n')
+  const bestTokens = new Set(best.text.normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter((token) => token.length >= 2))
+  const stableCandidateCount = candidateResults.filter((candidate) => {
+    const tokens = new Set(candidate.text.normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter((token) => token.length >= 2))
+    const shared = [...tokens].filter((token) => bestTokens.has(token)).length
+    return shared / Math.max(1, Math.min(tokens.size, bestTokens.size)) >= 0.45
+  }).length
   return {
     text,
-    confidence: full.data.confidence,
-    passes: urlText ? 2 : 1,
-    width: prepared.width,
-    height: prepared.height,
+    confidence: best.confidence,
+    passes: candidateResults.length,
+    width: candidates[0]!.width,
+    height: candidates[0]!.height,
     engine: 'Tesseract.js 7',
     qrCodeCount: qrData ? 1 : 0,
+    candidates: candidateResults,
+    processingMs: Math.round(performance.now() - startedAt),
+    stableCandidateCount,
   }
 }
 
@@ -421,7 +530,12 @@ const stateCopy: Record<DecisionState, { label: string; icon: string }> = {
 
 function renderImageBatchPanel(items: ImageAnalysisItem[], sameConversation: boolean) {
   if (!items.length) return ''
-  const strongest = selectStrongestImageResult(items)
+  const strongest = selectStrongestImageResult([
+    ...items,
+    ...(supplementalAnalysis?.scope === 'background' && supplementalAnalysis.result
+      ? [{ order: items.length + 1, result: supplementalAnalysis.result }]
+      : []),
+  ])
   const cards = items.map((item, index) => {
     const copy = stateCopy[item.result.state]
     const evidence = item.result.findings
@@ -431,14 +545,28 @@ function renderImageBatchPanel(items: ImageAnalysisItem[], sameConversation: boo
     const quality = item.failure
       ? '未取得文字'
       : item.confidence >= 80 ? '較高' : item.confidence >= 60 ? '中等' : '偏低'
-    return `<article class="image-result-card state-${item.result.state.toLowerCase()}">
+    const effective = effectiveImageText(item)
+    const sourceLabels = [
+      item.correctionStatus === 'corrected' ? '人工修正 OCR' : '自動 OCR',
+      item.supplementalText ? '使用者補充文字' : '',
+      item.qrCodeCount ? 'QR Code 解析' : '',
+    ].filter(Boolean).join('、')
+    const candidateRows = item.candidates.map((candidate) => `<li>${escapeHtml(candidate.label)}：${Math.round(candidate.confidence)}% · ${candidate.characters} 字 · ${(candidate.durationMs / 1000).toFixed(1)} 秒</li>`).join('')
+    return `<article class="image-result-card state-${item.result.state.toLowerCase()}" data-image-card="${escapeHtml(item.imageId)}">
       ${previewUrls[index] ? `<img src="${escapeHtml(previewUrls[index])}" alt="第 ${item.order} 張截圖縮圖" />` : ''}
       <div>
         <p class="image-result-meta">第 ${item.order} 張 · ${escapeHtml(item.fileName)} · OCR 品質${quality}${item.failure ? '' : `（${Math.round(item.confidence)}%）`}</p>
         <h4>${escapeHtml(copy.label)} <span>${escapeHtml(item.result.state)} · 證據分數 ${item.result.score}</span></h4>
         <p>${escapeHtml(item.failure ?? item.result.summary)}</p>
+        <p class="source-tags"><strong>文字來源：</strong>${escapeHtml(sourceLabels)} · 證據完整度：${escapeHtml(item.result.completeness)}</p>
         <ul>${evidence}</ul>
-        ${item.text ? `<details><summary>查看本機 OCR 文字</summary><pre>${escapeHtml(item.text)}</pre></details>` : ''}
+        <details><summary>查看辨識文字與候選品質</summary><pre>${escapeHtml(item.ocrOriginalText || '沒有自動辨識文字')}</pre><ul class="candidate-metrics">${candidateRows || '<li>沒有 OCR 候選結果</li>'}</ul></details>
+        <details class="correction-editor" ${item.correctionStatus === 'corrected' ? 'open' : ''}><summary>修正辨識文字</summary>
+          <label>第 ${item.order} 張修正內容<textarea data-correction-text="${escapeHtml(item.imageId)}" maxlength="12000">${escapeHtml(item.correctionStatus === 'corrected' ? item.userCorrectedText : item.ocrOriginalText)}</textarea></label>
+          <p>${item.correctionStatus === 'corrected' ? '目前依使用者修正文字分析；OCR 信心值未被提高。' : '原始 OCR 會保留；即使沒有辨識文字也可手動輸入。'}</p>
+          <div class="correction-actions"><button type="button" data-reanalyze-image="${escapeHtml(item.imageId)}">重新分析這一張</button><button type="button" data-restore-image="${escapeHtml(item.imageId)}" ${item.correctionStatus === 'corrected' ? '' : 'disabled'}>恢復原始 OCR</button></div>
+        </details>
+        ${effective.textSource !== 'automatic-ocr' ? `<p class="correction-notice">依使用者${effective.textSource === 'mixed' ? '修正／補充' : '修正'}文字分析；不代表 OCR 自動辨識成功。</p>` : ''}
       </div>
     </article>`
   }).join('')
@@ -446,9 +574,20 @@ function renderImageBatchPanel(items: ImageAnalysisItem[], sameConversation: boo
     <div class="image-batch-heading"><div><p>多張截圖分析</p><h3>每張獨立結果與整批結論</h3></div><span>${sameConversation ? '同一段對話（重疊文字已去除）' : '各張獨立（預設）'}</span></div>
     <p class="batch-conclusion">${sameConversation
       ? '整批結論會額外分析去除相鄰重疊文字後的完整對話；下方仍保留每張獨立結果。'
-      : `整批不會把不同圖片的弱訊號相加；目前依優先序取第 ${strongest?.order ?? 1} 張作為整批警示。`}</p>
+      : strongest && strongest.order > items.length
+        ? '整批不會把不同圖片的弱訊號相加；目前由獨立背景說明提供最高警示。'
+        : `整批不會把不同圖片的弱訊號相加；目前依優先序取第 ${strongest?.order ?? 1} 張作為整批警示。`}</p>
     <div class="image-result-list">${cards}</div>
+    ${renderSupplementalAnalysis()}
   </section>`
+}
+
+function renderSupplementalAnalysis() {
+  if (!supplementalAnalysis?.text.trim()) return ''
+  const scopeLabels: Record<SupplementScope, string> = {
+    background: '獨立背景說明', conversation: '同一段對話整組補充', 'single-image': `第 ${supplementalAnalysis.targetIndex ?? 1} 張補充`,
+  }
+  return `<article class="supplement-result"><strong>使用者補充文字 · ${scopeLabels[supplementalAnalysis.scope]}</strong><p>這是使用者提供的分析脈絡，不是已獨立查證的案件證據。</p>${supplementalAnalysis.result ? `<span>${supplementalAnalysis.result.state} · 證據分數 ${supplementalAnalysis.result.score}</span>` : ''}</article>`
 }
 
 function renderResult(result: AnalysisResult) {
@@ -465,7 +604,7 @@ function renderResult(result: AnalysisResult) {
     <div class="result-card risk-${result.level}">
       <div class="result-summary">
         <div class="result-icon">${copy.icon}</div>
-        <div><p>檢查結果 · ${escapeHtml(result.state)} · 證據分數 ${result.score}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
+        <div><p>檢查結果 · ${escapeHtml(result.state)} · 證據分數 ${result.score} · 證據完整度 ${escapeHtml(result.completeness)}</p><h2>${copy.label}</h2><p>${escapeHtml(result.summary)}</p></div>
         <span class="category">可能類型：${escapeHtml(result.category)}</span>
       </div>
       <div class="result-columns">
@@ -483,11 +622,14 @@ function renderResult(result: AnalysisResult) {
   resultWrap.hidden = false
   resultWrap.scrollIntoView({ behavior: 'smooth', block: 'start' })
   bindReportForm(result)
+  bindImageCorrectionControls()
   document.querySelector<HTMLButtonElement>('#reset-button')?.addEventListener('click', () => {
     input.value = ''
     analysisContext = { source: 'text' }
     fileInput.value = ''
     resetImageUpload()
+    supplementTextInput.value = ''
+    supplementScopeInput.value = 'background'
     fileName.textContent = ''
     resultWrap.hidden = true
     updateCounter()
@@ -586,6 +728,9 @@ function renderSemanticResult(semantic: SemanticSearchResult) {
   if (semantic.status === 'unavailable') {
     return `<section class="database-panel database-error"><div class="database-title"><span>!</span><div><h3>本機語意模型暫時無法使用</h3><p>本次仍已完成話術、網址、政府與社群案例庫比對</p></div></div></section>`
   }
+  if (semantic.status === 'not-matched' && semantic.closestCandidate) {
+    return `<section class="database-panel database-neutral"><div class="database-title"><span>AI</span><div><h3>本機語意模型未達警示門檻</h3><p>最接近「${escapeHtml(semantic.closestCandidate.category)}」${Math.round(semantic.closestCandidate.similarity * 100)}%；最接近正常語句 ${Math.round((semantic.closestBenignSimilarity ?? 0) * 100)}%</p></div></div><p class="database-warning">相似度僅供診斷，不代表安全或詐騙認定。</p></section>`
+  }
   return ''
 }
 
@@ -607,14 +752,14 @@ function renderEvidencePanel(result: AnalysisResult) {
   const semanticStatus = result.semantic.status === 'matched'
     ? `本機模型找到「${escapeHtml(result.semantic.matches[0]?.category ?? '相似手法')}」語意近似。`
     : result.semantic.status === 'not-matched'
-      ? '本機模型未達語意相似門檻。'
+      ? `本機模型未達語意相似門檻${result.semantic.closestCandidate ? `；最接近「${escapeHtml(result.semantic.closestCandidate.category)}」${Math.round(result.semantic.closestCandidate.similarity * 100)}%，正常語句 ${Math.round((result.semantic.closestBenignSimilarity ?? 0) * 100)}%` : ''}。`
       : result.semantic.status === 'skipped'
         ? '規則、網址或案例已提供足夠風險證據，本次免載入大型模型。'
       : result.semantic.status === 'disabled'
         ? '使用者已關閉本機語意模型。'
         : '本機語意模型無法載入。'
   const ocrRow = result.context.source === 'image'
-    ? `<li><strong>截圖文字與 QR 擷取</strong><span>${result.context.ocrFailure ? `辨識失敗：${escapeHtml(result.context.ocrFailure)}` : `${result.context.imageCount ?? 1} 張中完成 ${result.context.ocrCompletedCount ?? 1} 張${result.context.ocrFailedCount ? `、失敗 ${result.context.ocrFailedCount} 張` : ''} · 平均 OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · 擷取 ${result.context.ocrTextLength ?? 0} 字 · ${result.context.ocrPasses ?? 0} 次辨識 · QR ${result.context.qrCodeCount ?? 0} 個 · ${escapeHtml(result.context.ocrEngine ?? 'OCR 引擎未知')}`}；圖片依選取順序逐張處理，QR 只在本機解碼並比對字串，不會自動開啟；信心值不是詐騙機率。</span></li>`
+    ? `<li><strong>截圖文字與 QR 擷取</strong><span>${result.context.ocrFailure ? `辨識失敗：${escapeHtml(result.context.ocrFailure)}` : `${result.context.imageCount ?? 1} 張中完成 ${result.context.ocrCompletedCount ?? 1} 張${result.context.ocrFailedCount ? `、失敗 ${result.context.ocrFailedCount} 張` : ''} · 平均 OCR 信心 ${Math.round(result.context.ocrConfidence ?? 0)}% · 擷取 ${result.context.ocrTextLength ?? 0} 字 · ${result.context.ocrPasses ?? 0} 次辨識 · 候選 ${result.context.ocrCandidateCount ?? result.context.ocrPasses ?? 0} 個／穩定 ${result.context.ocrStableCandidateCount ?? 0} 個 · ${result.context.ocrProcessingMs ? `${(result.context.ocrProcessingMs / 1000).toFixed(1)} 秒 · ` : ''}QR ${result.context.qrCodeCount ?? 0} 個 · ${escapeHtml(result.context.ocrEngine ?? 'OCR 引擎未知')}`}；文字來源：${escapeHtml(result.context.textSource ?? 'automatic-ocr')}；圖片依序在本機處理，QR 不會自動開啟；信心值不是詐騙機率，人工修正不會提高信心。</span></li>`
     : `<li><strong>輸入內容</strong><span>${result.context.source === 'file' ? '由文字檔匯入' : '由使用者貼上'}，直接進行本機比對。</span></li>`
   const officialReferences = [...new Map(result.findings
     .filter((finding) => finding.source)
@@ -746,6 +891,7 @@ imageInput.addEventListener('change', () => {
   }
 
   selectedImageFiles = selectedFiles
+  updateSupplementTargets()
   renderImageThumbnails(selectedFiles)
   imagePreview.hidden = false
   fileName.textContent = ''
@@ -772,18 +918,137 @@ async function analyzeTextContent(content: string, context: AnalysisContext, upd
   return analyzeContent(content, database, community, context, semantic)
 }
 
+function analysisContextForItem(item: ImageAnalysisItem, textSource: ImageTextSource, text: string): AnalysisContext {
+  return {
+    source: 'image', textSource,
+    ocrConfidence: item.confidence, ocrPasses: item.passes, ocrTextLength: text.length,
+    ocrEngine: item.engine, imageCount: 1,
+    ocrCompletedCount: item.ocrOriginalText.trim() ? 1 : 0,
+    ocrFailedCount: item.ocrOriginalText.trim() ? 0 : 1,
+    imageWidth: item.width, imageHeight: item.height, qrCodeCount: item.qrCodeCount,
+    ocrCandidateCount: item.candidates.length, ocrStableCandidateCount: item.stableCandidateCount,
+    ocrProcessingMs: item.processingMs,
+    ocrFailure: text.trim() ? undefined : item.failure,
+    supplementalScope: item.supplementalText ? 'single-image' : undefined,
+  }
+}
+
+async function analyzeImageItem(item: ImageAnalysisItem) {
+  const effective = effectiveImageText(item)
+  const result = await analyzeTextContent(effective.text, analysisContextForItem(item, effective.textSource, effective.text))
+  return { ...item, text: effective.text, textSource: effective.textSource, result }
+}
+
+async function recomputeBatchResult() {
+  const successful = imageAnalysisItems.filter((item) => item.text.trim())
+  if (supplementalAnalysis?.scope === 'background' && supplementalAnalysis.text.trim()) {
+    supplementalAnalysis.result = await analyzeTextContent(supplementalAnalysis.text, { source: 'text', textSource: 'user-supplied', supplementalScope: 'background' })
+  }
+  if (imagesSameConversation && successful.length) {
+    const texts = successful.map((item) => item.text)
+    if (supplementalAnalysis?.scope === 'conversation') texts.push(supplementalAnalysis.text)
+    const combined = deduplicateConversationTexts(texts)
+    const averageConfidence = successful.reduce((sum, item) => sum + item.confidence, 0) / successful.length
+    analysisContext = {
+      source: 'image', textSource: supplementalAnalysis?.scope === 'conversation' ? 'mixed' : successful.some((item) => item.textSource !== 'automatic-ocr') ? 'mixed' : 'automatic-ocr',
+      ocrConfidence: averageConfidence, ocrPasses: successful.reduce((sum, item) => sum + item.passes, 0),
+      ocrTextLength: combined.length, ocrEngine: successful[0]?.engine ?? 'Tesseract.js 7', imageCount: selectedImageFiles.length,
+      ocrCompletedCount: successful.filter((item) => item.ocrOriginalText.trim()).length,
+      ocrFailedCount: imageAnalysisItems.filter((item) => !item.ocrOriginalText.trim()).length,
+      qrCodeCount: successful.reduce((sum, item) => sum + item.qrCodeCount, 0),
+      ocrCandidateCount: successful.reduce((sum, item) => sum + item.candidates.length, 0),
+      ocrStableCandidateCount: successful.reduce((sum, item) => sum + item.stableCandidateCount, 0),
+      ocrProcessingMs: successful.reduce((sum, item) => sum + item.processingMs, 0), supplementalScope: supplementalAnalysis?.scope,
+    }
+    return analyzeTextContent(combined, analysisContext)
+  }
+  const candidates = [
+    ...imageAnalysisItems,
+    ...(supplementalAnalysis?.scope === 'background' && supplementalAnalysis.result
+      ? [{ order: imageAnalysisItems.length + 1, result: supplementalAnalysis.result }]
+      : []),
+  ]
+  const strongest = selectStrongestImageResult(candidates)
+  const fallback = analyzeContent('', undefined, undefined, { source: 'image', textSource: 'automatic-ocr', ocrFailure: '圖片中沒有辨識到文字' })
+  analysisContext = strongest?.result.context ?? fallback.context
+  return strongest?.result ?? fallback
+}
+
+function bindImageCorrectionControls() {
+  document.querySelectorAll<HTMLButtonElement>('[data-reanalyze-image]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const imageId = button.dataset.reanalyzeImage!
+      const itemIndex = imageAnalysisItems.findIndex((item) => item.imageId === imageId)
+      const editor = document.querySelector<HTMLTextAreaElement>(`[data-correction-text="${CSS.escape(imageId)}"]`)
+      if (itemIndex < 0 || !editor) return
+      button.disabled = true
+      const current = imageAnalysisItems[itemIndex]!
+      imageAnalysisItems[itemIndex] = await analyzeImageItem({
+        ...current, userCorrectedText: editor.value, correctionStatus: 'corrected', failure: editor.value.trim() ? undefined : current.failure,
+      })
+      const batchResult = await recomputeBatchResult()
+      renderResult(batchResult)
+    })
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-restore-image]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const imageId = button.dataset.restoreImage!
+      const itemIndex = imageAnalysisItems.findIndex((item) => item.imageId === imageId)
+      if (itemIndex < 0) return
+      button.disabled = true
+      const current = imageAnalysisItems[itemIndex]!
+      imageAnalysisItems[itemIndex] = await analyzeImageItem({ ...current, userCorrectedText: '', correctionStatus: 'restored' })
+      const batchResult = await recomputeBatchResult()
+      renderResult(batchResult)
+    })
+  })
+}
+
+cancelOcrButton.addEventListener('click', () => {
+  ocrCancelled = true
+  cancelOcrButton.disabled = true
+  ocrStatus.textContent = '正在中止；目前這一輪完成後會停止，不會處理下一張。'
+  void releaseOcrWorker()
+})
+
+sameConversationInput.addEventListener('change', () => {
+  const conversationOption = [...supplementScopeInput.options].find((option) => option.value === 'conversation')
+  if (conversationOption) conversationOption.disabled = !sameConversationInput.checked
+  if (!sameConversationInput.checked && supplementScopeInput.value === 'conversation') {
+    supplementScopeInput.value = 'background'
+    document.querySelector<HTMLElement>('#supplement-hint')!.textContent = '整組補充文字需先勾選「同一段對話」；目前已改回獨立背景說明。'
+  }
+})
+
 startOcrButton.addEventListener('click', async () => {
   if (!selectedImageFiles.length) return
   imageAnalysisItems = []
   imagesSameConversation = sameConversationInput.checked
+  ocrCancelled = false
+  supplementalAnalysis = null
+  const supplementText = supplementTextInput.value.trim()
+  const selectedScope = supplementScopeInput.value
+  if (selectedScope === 'conversation' && !imagesSameConversation) {
+    document.querySelector<HTMLElement>('#supplement-hint')!.textContent = '請先勾選「這些截圖屬於同一段對話」，才能把文字套用到整組。'
+    sameConversationInput.focus()
+    return
+  }
+  if (supplementText) {
+    supplementalAnalysis = selectedScope.startsWith('image-')
+      ? { text: supplementText, scope: 'single-image', targetIndex: Number(selectedScope.slice(6)) }
+      : { text: supplementText, scope: selectedScope as SupplementScope }
+  }
   imageInput.disabled = true
   startOcrButton.disabled = true
   sameConversationInput.disabled = true
+  cancelOcrButton.hidden = false
+  cancelOcrButton.disabled = false
   scanButton.disabled = true
   semanticToggle.disabled = true
   renderImageThumbnails(selectedImageFiles, false)
   try {
     for (const [index, file] of selectedImageFiles.entries()) {
+      if (ocrCancelled) break
       batchProgressPrefix = `第 ${index + 1}/${selectedImageFiles.length} 張：`
       ocrTitle.textContent = `辨識並分析：第 ${index + 1} 張，共 ${selectedImageFiles.length} 張`
       updateOcrProgress(0, '')
@@ -791,69 +1056,61 @@ startOcrButton.addEventListener('click', async () => {
       let failure = ''
       try {
         recognized = await recognizeScreenshot(file)
-        if (!recognized.text.trim()) throw new Error('沒有辨識到文字')
+        if (!recognized.text.trim()) failure = '圖片中沒有辨識到文字'
       } catch (firstError) {
+        if (ocrCancelled || (firstError instanceof Error && firstError.message === '使用者已取消辨識')) break
         await releaseOcrWorker()
         batchProgressPrefix = `第 ${index + 1}/${selectedImageFiles.length} 張重試：`
         ocrStatus.textContent = `${batchProgressPrefix}重新啟動本機辨識引擎`
         try {
           recognized = await recognizeScreenshot(file)
-          if (!recognized.text.trim()) throw new Error('沒有辨識到文字')
+          if (!recognized.text.trim()) failure = '圖片中沒有辨識到文字'
         } catch (retryError) {
+          if (ocrCancelled || (retryError instanceof Error && retryError.message === '使用者已取消辨識')) break
           console.warn('Screenshot OCR failed after one retry', { firstError, retryError })
-          failure = retryError instanceof Error && retryError.message === '沒有辨識到文字'
-            ? '圖片中沒有辨識到文字'
-            : '文字辨識途中中斷'
+          failure = '文字辨識途中中斷'
         }
       }
 
       if (recognized?.text.trim()) {
-        const context: AnalysisContext = {
-          source: 'image', ocrConfidence: recognized.confidence, ocrPasses: recognized.passes,
-          ocrTextLength: recognized.text.trim().length, ocrEngine: recognized.engine,
-          imageCount: 1, ocrCompletedCount: 1, ocrFailedCount: 0,
-          imageWidth: recognized.width, imageHeight: recognized.height, qrCodeCount: recognized.qrCodeCount,
+        const supplementalText = supplementalAnalysis?.scope === 'single-image' && supplementalAnalysis.targetIndex === index + 1
+          ? supplementalAnalysis.text : undefined
+        const baseItem: ImageAnalysisItem = {
+          imageId: `image-${index + 1}-${Date.now()}`, imageIndex: index, order: index + 1, fileName: file.name,
+          ...recognized, result: undefined as unknown as AnalysisResult, failure: undefined,
+          ocrOriginalText: recognized.text, userCorrectedText: '', correctionStatus: 'original',
+          textSource: supplementalText ? 'mixed' : 'automatic-ocr', supplementalText,
         }
-        const result = await analyzeTextContent(recognized.text, context)
-        imageAnalysisItems.push({ order: index + 1, fileName: file.name, ...recognized, result })
+        imageAnalysisItems.push(await analyzeImageItem(baseItem))
       } else {
-        const context: AnalysisContext = {
-          source: 'image', ocrConfidence: 0, ocrPasses: 0, ocrTextLength: 0, ocrEngine: 'Tesseract.js 7',
-          imageCount: 1, ocrCompletedCount: 0, ocrFailedCount: 1, ocrFailure: failure || '圖片中沒有辨識到文字',
+        const supplementalText = supplementalAnalysis?.scope === 'single-image' && supplementalAnalysis.targetIndex === index + 1
+          ? supplementalAnalysis.text : undefined
+        const baseItem: ImageAnalysisItem = {
+          imageId: `image-${index + 1}-${Date.now()}`, imageIndex: index, order: index + 1, fileName: file.name,
+          text: '', confidence: 0, passes: 0, width: 0, height: 0, engine: 'Tesseract.js 7', qrCodeCount: 0,
+          failure: failure || '圖片中沒有辨識到文字', result: undefined as unknown as AnalysisResult,
+          ocrOriginalText: '', userCorrectedText: '', correctionStatus: 'original',
+          textSource: supplementalText ? 'user-supplied' : 'automatic-ocr', supplementalText,
+          candidates: [], processingMs: 0, stableCandidateCount: 0,
         }
-        imageAnalysisItems.push({
-          order: index + 1, fileName: file.name, text: '', confidence: 0, passes: 0, width: 0, height: 0,
-          engine: 'Tesseract.js 7', qrCodeCount: 0, failure: context.ocrFailure, result: analyzeContent('', undefined, undefined, context),
-        })
+        imageAnalysisItems.push(await analyzeImageItem(baseItem))
       }
     }
     await releaseOcrWorker()
-    const successful = imageAnalysisItems.filter((item) => !item.failure)
+    const successful = imageAnalysisItems.filter((item) => item.text.trim())
     const displayText = successful.map((item) => `[截圖 ${item.order}/${selectedImageFiles.length}]\n${item.text.trim()}`).join('\n\n')
     input.value = displayText.slice(0, 12000)
     updateCounter()
 
-    let batchResult: AnalysisResult
-    if (imagesSameConversation && successful.length) {
-      const combined = deduplicateConversationTexts(successful.map((item) => item.text))
-      const averageConfidence = successful.reduce((sum, item) => sum + item.confidence, 0) / successful.length
-      analysisContext = {
-        source: 'image', ocrConfidence: averageConfidence,
-        ocrPasses: successful.reduce((sum, item) => sum + item.passes, 0), ocrTextLength: combined.length,
-        ocrEngine: successful[0]?.engine ?? 'Tesseract.js 7', imageCount: selectedImageFiles.length,
-        ocrCompletedCount: successful.length, ocrFailedCount: imageAnalysisItems.length - successful.length,
-        qrCodeCount: successful.reduce((sum, item) => sum + item.qrCodeCount, 0),
-      }
-      batchResult = await analyzeTextContent(combined, analysisContext)
-    } else {
-      batchResult = selectStrongestImageResult(imageAnalysisItems)?.result
-        ?? analyzeContent('', undefined, undefined, { source: 'image', ocrFailure: '圖片中沒有辨識到文字' })
-      analysisContext = batchResult.context
-    }
+    const batchResult = await recomputeBatchResult()
     batchProgressPrefix = ''
     updateOcrProgress(1, 'recognizing text')
-    ocrTitle.textContent = `${successful.length} 張完成、${imageAnalysisItems.length - successful.length} 張未完成`
-    ocrStatus.textContent = imagesSameConversation
+    ocrTitle.textContent = ocrCancelled
+      ? `已中止：完成 ${imageAnalysisItems.length}/${selectedImageFiles.length} 張`
+      : `${successful.length} 張取得可分析文字、${imageAnalysisItems.length - successful.length} 張未取得文字`
+    ocrStatus.textContent = ocrCancelled
+      ? '已保留中止前完成的結果；未處理的圖片沒有被判定為安全。'
+      : imagesSameConversation
       ? '已保留每張獨立結果，並以去除相鄰重疊文字後的對話產生整批結論。'
       : '已逐張獨立分析；整批只採最高警示，不會把不同圖片的弱訊號相加。'
     renderResult(batchResult)
@@ -863,6 +1120,8 @@ startOcrButton.addEventListener('click', async () => {
     imageInput.disabled = false
     startOcrButton.disabled = false
     sameConversationInput.disabled = false
+    cancelOcrButton.hidden = true
+    cancelOcrButton.disabled = false
     scanButton.disabled = false
     semanticToggle.disabled = false
   }

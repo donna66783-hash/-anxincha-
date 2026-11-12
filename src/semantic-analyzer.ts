@@ -14,6 +14,8 @@ export interface SemanticSearchResult {
   model: string
   error?: string
   skipReason?: string
+  closestCandidate?: SemanticMatch
+  closestBenignSimilarity?: number
 }
 
 export interface SemanticProgress {
@@ -36,6 +38,8 @@ const prototypes: Prototype[] = [
   { category: '帳號釣魚', text: '帳號即將停用，請立即點擊連結重新登入驗證，並輸入密碼與簡訊驗證碼。' },
   { category: '遠端控制詐騙', text: '要求下載遠端控制軟體並開啟螢幕共享，讓客服協助操作手機或網路銀行。' },
   { category: '網路購物詐騙', text: '賣家要求離開購物平台私下交易，先匯款後才寄貨，或聲稱金流認證失敗。' },
+  { category: '假物流／假買家導流', text: '社群陌生人說免費贈送商品，傳送不明外部網站，要求填寫收件資料或物流訂單，再把訂單號交給對方寄件。' },
+  { category: '假物流／假買家導流', text: '買家或賣家要求離開 Messenger 或交易平台，進入非官方物流網址填寫全家超商寄件訂單、金融資料或交易認證。' },
   { category: '交友／感情詐騙', text: '網路認識的對象培養感情後，以急難、包裹或投資為由要求匯款。' },
   { category: '冒充親友', text: '突然用新帳號自稱親友，說手機壞了或遇到急事，要求立刻代墊或轉帳。' },
 ]
@@ -153,11 +157,17 @@ export async function searchSemanticSimilarity(
         bestByCategory.set(prototype.category, { category: prototype.category, similarity, example: prototype.text })
       }
     })
-    const matches = [...bestByCategory.values()]
+    const rankedCandidates = [...bestByCategory.values()].sort((left, right) => right.similarity - left.similarity)
+    const matches = rankedCandidates
       .filter((match) => match.similarity >= MATCH_THRESHOLD && match.similarity - closestBenign >= BENIGN_MARGIN)
-      .sort((left, right) => right.similarity - left.similarity)
       .slice(0, 1)
-    return { status: matches.length ? 'matched' : 'not-matched', matches, model: SEMANTIC_MODEL }
+    return {
+      status: matches.length ? 'matched' : 'not-matched',
+      matches,
+      model: SEMANTIC_MODEL,
+      closestCandidate: rankedCandidates[0],
+      closestBenignSimilarity: closestBenign,
+    }
   } catch (error) {
     return {
       status: 'unavailable',

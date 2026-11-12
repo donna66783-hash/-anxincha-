@@ -74,11 +74,18 @@ export function normalizeDomain(value: string) {
 }
 
 export function extractDomainInputs(content: string) {
-  const matches = content.match(/(?:https?:\/\/)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?[.。．｡])+[\p{L}\p{N}-]{2,63}(?:\/[^\s<>"']*)?/giu) ?? []
+  const explicitUrls = content.match(/https?:\/\/[^\s<>"']+/giu) ?? []
+  const remaining = explicitUrls.reduce((text, url) => text.replace(url, ' '), content)
+  const bareDomains = remaining.match(/(?<![\p{L}\p{N}-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.。．｡])+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?:\/[^\s<>"']*)?/giu) ?? []
+  const matches = [...explicitUrls, ...bareDomains]
   const unique = new Map<string, { original: string; normalized: string }>()
   matches.forEach((original) => {
     const normalized = normalizeDomain(original)
-    if (normalized.includes('.') && !unique.has(normalized)) unique.set(normalized, { original, normalized })
+    const rawHost = original.match(/^https?:\/\/([^/]+)/iu)?.[1]
+    const preservedOriginal = rawHost?.endsWith('.')
+      ? (original.match(/^https?:\/\/[^/]+/iu)?.[0] ?? original).replace(/\.$/, '')
+      : original.replace(/[，！？、；：）】》〉\]}>,!?;:'"]+$/gu, '')
+    if (normalized.includes('.') && !unique.has(normalized)) unique.set(normalized, { original: preservedOriginal, normalized })
   })
   return [...unique.values()]
 }

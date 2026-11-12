@@ -5,6 +5,7 @@ import { normalizeForMatching } from './text-normalizer'
 
 export type RiskLevel = 'low' | 'medium' | 'high'
 export type DecisionState = 'HIGH_RISK' | 'SUSPICIOUS' | 'NO_KNOWN_SIGNALS' | 'INSUFFICIENT_EVIDENCE'
+export type EvidenceCompleteness = 'low' | 'medium' | 'high'
 
 export interface Finding {
   title: string
@@ -25,6 +26,7 @@ export interface AnalysisResult {
   community: CommunitySearchResult
   semantic: SemanticSearchResult
   context: AnalysisContext
+  completeness: EvidenceCompleteness
 }
 
 export interface AnalysisContext {
@@ -40,6 +42,11 @@ export interface AnalysisContext {
   imageHeight?: number
   qrCodeCount?: number
   ocrFailure?: string
+  ocrCandidateCount?: number
+  ocrStableCandidateCount?: number
+  ocrProcessingMs?: number
+  textSource?: 'automatic-ocr' | 'user-corrected-ocr' | 'user-supplied' | 'mixed'
+  supplementalScope?: 'single-image' | 'conversation' | 'background'
 }
 
 interface Rule {
@@ -79,6 +86,14 @@ const rules: Rule[] = [
     detail: '驗證碼、密碼與網銀資料都不能交給任何人，客服也不會索取。',
     weight: 30,
     category: '帳號或金錢詐騙',
+  },
+  {
+    pattern: /(?:交易|訂單|帳號).{0,18}(?:受限|限制|異常|凍結|取消).{0,30}(?:認證|驗證|銀行帳號|金融資料)|(?:認證|驗證).{0,24}(?:銀行帳號|金融資料|提款卡)/i,
+    title: '以交易異常為由要求金融認證',
+    detail: '正常交易平台不會透過陌生外部網站要求提供網銀、密碼或驗證碼來解除交易限制。',
+    weight: 30,
+    category: '假交易認證',
+    behavior: 'financial-verification',
   },
   {
     pattern: /立即|馬上|限時|最後機會|帳號將停用|今天內|現在匯款/i,
@@ -168,6 +183,50 @@ const rules: Rule[] = [
 ]
 
 const suspiciousTlds = new Set(['top', 'xyz', 'click', 'shop', 'vip', 'work', 'live'])
+const familyMartOfficialRoots = ['family.com.tw', 'famiport.com.tw']
+
+function isDomainWithin(domain: string, roots: string[]) {
+  return roots.some((root) => domain === root || domain.endsWith(`.${root}`))
+}
+
+function inspectTransactionBehavior(text: string, domains: string[]): { findings: Finding[]; category?: string } {
+  const antiScamContext = /(?:防詐|反詐|詐騙手法|案例提醒|切勿|不要依照)/i.test(text)
+  const tutorialContext = /(?:教學|操作說明|寄件步驟|官方說明|範例)/i.test(text)
+  if (antiScamContext && !/(?:請|要求|務必).{0,16}(?:填寫|認證|匯款|提供)/i.test(text)) return { findings: [] }
+
+  const gift = /(?:免費.{0,8})?(?:贈送|送你|送出|贈品|食安自負)|(?:免費|無償).{0,12}(?:商品|物品|食品|禮物)/i.test(text)
+  const logisticsRequest = /(?:你|請|麻煩|需要|要求).{0,10}(?:填寫|填好|填完|登記|建立).{0,22}(?:訂單|寄件|物流|收件|全家|超商)|(?:填寫|填好|填完).{0,18}(?:全家|訂單號|寄件|收件)/i.test(text)
+  const platformContext = /Messenger|Marketplace|Facebook|臉書|賣場|交易平台|外部網站|離開.{0,8}(?:平台|對話)/i.test(text)
+  const claimsFamilyMart = /全家|FamilyMart|FamiPort/i.test(text)
+  const externalDomains = domains.filter((domain) => !isDomainWithin(domain, familyMartOfficialRoots))
+  const unknownExternal = externalDomains.length > 0
+  const findings: Finding[] = []
+
+  if (unknownExternal && logisticsRequest) {
+    findings.push({
+      title: '不明外部網站要求建立物流／收件訂單',
+      detail: `內容要求在外部網站填寫寄件或訂單資料；辨識到的網域「${externalDomains[0]}」未命中目前政府快照，也無法僅憑文字確認為所聲稱服務的官方網域。請改由官方 App 或自行輸入官網查證。`,
+      weight: 20,
+    })
+  }
+  if (claimsFamilyMart && unknownExternal && !isDomainWithin(externalDomains[0] ?? '', familyMartOfficialRoots)) {
+    findings.push({
+      title: '網址無法確認為全家官方服務網域',
+      detail: `對話聲稱使用全家物流，但辨識到的「${externalDomains[0]}」不在本工具已核對的 family.com.tw 或 famiport.com.tw 網域範圍。這不代表已確認詐騙，應從全家官方網站或 App 重新進入服務。`,
+      weight: 10,
+      source: { name: '全家便利商店店到店服務說明', url: 'https://www.family.com.tw/Marketing/zh/ContactUs' },
+    })
+  }
+  const connectedSignals = [gift, logisticsRequest, unknownExternal, platformContext].filter(Boolean).length
+  if (!tutorialContext && connectedSignals >= 3) {
+    findings.push({
+      title: '免費贈送、外部網站與物流填單形成連續交易導流',
+      detail: '同一交易脈絡同時出現贈送誘因、外部網站與填寫物流訂單等具因果關聯的行為。單一行為可能正常，但組合出現時應先停止並透過官方管道確認。',
+      weight: connectedSignals >= 4 ? 18 : 14,
+    })
+  }
+  return { findings, category: findings.length ? '假物流／假買家交易導流' : undefined }
+}
 
 function inspectUrl(raw: string): Finding[] {
   const match = raw.match(/https?:\/\/[^\s<>'\"]+|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\/?[^\s<>'\"]*/i)
@@ -223,11 +282,15 @@ export function analyzeContent(
   const text = normalizeForMatching(content.trim())
   const educationalWarning = /(?:防詐|反詐|165).{0,80}(?:不要|切勿|請勿|避免)/i.test(text)
   const directRiskInstruction = /(?:請|要求|務必|必須|為了.{0,8}(?:安全|防詐)).{0,18}(?:匯款|轉帳|提供.{0,6}驗證碼|操作ATM|加.{0,6}LINE)/i.test(text)
+  const officialLogisticsTutorial = /(?:教學|操作說明|寄件步驟|官方說明|範例)/i.test(text)
+    && database.searchedDomains.some((domain) => isDomainWithin(domain, familyMartOfficialRoots))
   const matchedRules = educationalWarning && !directRiskInstruction
     ? []
-    : rules.filter((rule) => rule.pattern.test(text))
+    : rules.filter((rule) => rule.pattern.test(text) && !(officialLogisticsTutorial && rule.behavior === 'personal-data'))
   const findings: Finding[] = matchedRules.map(({ title, detail, weight }) => ({ title, detail, weight }))
   findings.push(...inspectUrl(text))
+  const transactionBehavior = inspectTransactionBehavior(text, database.searchedDomains)
+  findings.push(...transactionBehavior.findings)
   findings.push(...database.matches.slice(0, 3).map((match) => ({
     title: `政府歷史紀錄命中：${match.domain}`,
     detail: `此網域曾出現在${match.sources.map((source) => source.name).join('、')}。資料類型：${match.category}${match.lastSeen ? `；來源記錄日期：${match.lastSeen}` : '；來源記錄日期未知'}。這是歷史紀錄，不代表目前仍由詐騙者使用。`,
@@ -253,19 +316,23 @@ export function analyzeContent(
     })
   }
 
+  const hasUserProvidedText = context.textSource === 'user-corrected-ocr'
+    || context.textSource === 'user-supplied'
+    || context.textSource === 'mixed'
+  const hasPositiveFinding = findings.some((finding) => finding.weight > 0)
   const imageEvidenceInsufficient = context.source === 'image'
-    && (Boolean(context.ocrFailure)
+    && (!hasUserProvidedText && (Boolean(context.ocrFailure)
       || (context.ocrCompletedCount ?? 1) === 0
-      || (context.ocrConfidence ?? 0) < 60
+      || ((context.ocrConfidence ?? 0) < 60 && !hasPositiveFinding))
       || ((context.ocrTextLength ?? text.length) < 20 && !findings.some((finding) => finding.weight > 0)))
 
-  if (context.source === 'image' && context.ocrFailure) {
+  if (context.source === 'image' && context.ocrFailure && !hasUserProvidedText) {
     findings.push({
       title: '截圖無法充分辨識',
       detail: `${context.ocrFailure}。本次不能據此判定未發現風險，請換一張較清晰、完整的截圖或直接貼上文字。`,
       weight: 0,
     })
-  } else if (context.source === 'image' && (context.ocrConfidence ?? 0) < 60) {
+  } else if (context.source === 'image' && (context.ocrConfidence ?? 0) < 60 && !hasUserProvidedText) {
     findings.push({
       title: '截圖文字辨識可信度不足',
       detail: '部分文字可能沒有被正確讀取，因此不能把「未命中」視為安全，建議核對辨識文字或換清晰截圖。',
@@ -286,7 +353,16 @@ export function analyzeContent(
   }
 
   const score = Math.min(100, findings.reduce((sum, finding) => sum + finding.weight, 0))
-  const state: DecisionState = database.matches.length > 0 || score >= 55
+  const unstableOcrHighRisk = context.source === 'image'
+    && context.textSource !== 'user-corrected-ocr'
+    && context.textSource !== 'user-supplied'
+    && context.textSource !== 'mixed'
+    && context.ocrConfidence !== undefined
+    && context.ocrConfidence < 75
+    && (context.ocrStableCandidateCount ?? 1) < 2
+    && database.matches.length === 0
+    && !findings.some((finding) => finding.source)
+  const state: DecisionState = database.matches.length > 0 || (score >= 55 && !unstableOcrHighRisk)
     ? 'HIGH_RISK'
     : imageEvidenceInsufficient
       ? 'INSUFFICIENT_EVIDENCE'
@@ -305,6 +381,7 @@ export function analyzeContent(
   const category = database.matches[0]?.category
     ?? community.matches[0]?.category
     ?? semantic.matches[0]?.category
+    ?? transactionBehavior.category
     ?? Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0]
     ?? '尚未辨識特定類型'
 
@@ -319,6 +396,16 @@ export function analyzeContent(
     INSUFFICIENT_EVIDENCE: '圖片或文字證據不足，這次無法充分判斷，請補充較清晰或更完整的內容。',
   }
 
+  const completeness: EvidenceCompleteness = context.source !== 'image'
+    ? 'high'
+    : context.textSource === 'user-corrected-ocr' || context.textSource === 'user-supplied' || context.textSource === 'mixed'
+      ? ((context.ocrConfidence ?? 0) >= 60 ? 'medium' : 'low')
+      : (context.ocrConfidence ?? 0) >= 80 && (context.ocrTextLength ?? text.length) >= 50
+        ? 'high'
+        : (context.ocrConfidence ?? 0) >= 60 && (context.ocrTextLength ?? text.length) >= 20
+          ? 'medium'
+          : 'low'
+
   return {
     state,
     level,
@@ -330,6 +417,7 @@ export function analyzeContent(
     community,
     semantic,
     context,
+    completeness,
     actions: level === 'high'
       ? ['不要匯款、點連結或提供驗證碼', '掛斷後自行查找官方電話重新聯絡', '撥打 165，或請可信任的家人一起確認']
       : level === 'medium'

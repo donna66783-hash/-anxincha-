@@ -29,6 +29,13 @@ describe('threat database lookup', () => {
     }])
   })
 
+  it('does not turn Chinese text immediately before an URL into a fake IDN', () => {
+    expect(extractDomainInputs('食安自負。https://kk1.site/HZaNAd 你填寫好')).toEqual([{
+      original: 'https://kk1.site/HZaNAd',
+      normalized: 'kk1.site',
+    }])
+  })
+
   it('matches a known domain and its subdomains', () => {
     const result = searchRecords('登入 https://login.known-scam.example/account', testDatabase)
     expect(result.status).toBe('matched')

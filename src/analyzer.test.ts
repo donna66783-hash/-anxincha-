@@ -123,6 +123,26 @@ describe('analyzeContent', () => {
     expect(result.findings.some((finding) => finding.title.includes('部分截圖'))).toBe(true)
   })
 
+  it('raises the same Messenger case only when user-provided transaction context adds connected evidence', () => {
+    const text = 'Messenger 對話：是的贈送，食安自負。https://kk1.site/HZaNAd 你填寫好，填寫完有個全家訂單號，我拿單號去寄。補充背景：Facebook 上陌生人免費贈送商品，要求離開 Messenger 到外部網站填寫全家寄件訂單與收件資料。'
+    const result = analyzeContent(text, {
+      status: 'not-matched', matches: [], searchedDomains: ['kk1.site'], version: 'test', recordCount: 0,
+    }, undefined, { source: 'image', textSource: 'mixed', ocrConfidence: 71, ocrTextLength: text.length })
+    expect(result.state).toBe('HIGH_RISK')
+    expect(result.completeness).toBe('medium')
+    expect(result.category).toBe('假物流／假買家交易導流')
+  })
+
+  it('uses manual text after OCR failure without claiming automatic OCR confidence', () => {
+    const result = analyzeContent('請到不明外部網站重新認證並提供驗證碼。', undefined, undefined, {
+      source: 'image', textSource: 'user-corrected-ocr', ocrConfidence: 0, ocrCompletedCount: 0,
+      ocrFailedCount: 1, ocrTextLength: 22,
+    })
+    expect(result.state).toBe('SUSPICIOUS')
+    expect(result.completeness).toBe('low')
+    expect(result.context.ocrConfidence).toBe(0)
+  })
+
   it('uses suspicious state for a weak but known signal', () => {
     const result = analyzeContent('請加 LINE：abc123')
     expect(result.state).toBe('SUSPICIOUS')
@@ -190,5 +210,43 @@ describe('analyzeContent', () => {
     const result = analyzeContent('為了防詐安全驗證，請立即匯款到監管帳戶，並提供驗證碼。')
     expect(result.state).toBe('HIGH_RISK')
     expect(result.findings.some((finding) => finding.title.includes('驗證碼') || finding.title.includes('敏感資料'))).toBe(true)
+  })
+
+  it('flags the Messenger gift and unknown logistics-form behavior combination without blacklisting the domain', () => {
+    const text = 'Messenger 對話：是的贈送，食安自負。https://kk1.site/HZaNAd 你填寫好，填寫完有個全家訂單號，我拿單號去寄。'
+    const result = analyzeContent(text, {
+      status: 'not-matched', matches: [], searchedDomains: ['kk1.site'], version: 'test', recordCount: 0,
+    })
+    expect(result.state).toBe('SUSPICIOUS')
+    expect(result.score).toBe(48)
+    expect(result.category).toBe('假物流／假買家交易導流')
+    expect(result.findings.some((finding) => finding.title.includes('連續交易導流'))).toBe(true)
+    expect(result.findings.some((finding) => finding.detail.includes('不代表已確認詐騙'))).toBe(true)
+  })
+
+  it('does not flag a normal gift between friends without an external form', () => {
+    const result = analyzeContent('這台二手電風扇免費送你，我明天拿到全家門市交給你，食安自負。')
+    expect(result.state).toBe('NO_KNOWN_SIGNALS')
+  })
+
+  it('does not flag normal FamilyMart instructions on an official domain', () => {
+    const result = analyzeContent('全家官方寄件教學：請到 https://www.famiport.com.tw/ 填寫寄件資料並取得訂單號。', {
+      status: 'not-matched', matches: [], searchedDomains: ['famiport.com.tw'], version: 'test', recordCount: 0,
+    })
+    expect(result.state).toBe('NO_KNOWN_SIGNALS')
+    expect(result.findings.some((finding) => finding.title.includes('無法確認為全家'))).toBe(false)
+  })
+
+  it('flags fake transaction verification that requests financial information', () => {
+    const result = analyzeContent('買家說交易受限，請到外部網站重新認證，填寫銀行帳號、密碼與驗證碼才能取消訂單。')
+    expect(result.state).toBe('HIGH_RISK')
+  })
+
+  it('caps unstable low-confidence OCR at suspicious without independent strong evidence', () => {
+    const result = analyzeContent('我是檢察官，今天內請匯款到監管帳戶。', undefined, undefined, {
+      source: 'image', textSource: 'automatic-ocr', ocrConfidence: 52, ocrStableCandidateCount: 1, ocrTextLength: 22,
+    })
+    expect(result.state).toBe('SUSPICIOUS')
+    expect(result.completeness).toBe('low')
   })
 })
