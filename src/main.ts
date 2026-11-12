@@ -12,6 +12,8 @@ const examples = {
   database: '客服通知：請立刻登入 https://tobuyersepc24.com/57vgaqk 完成帳號驗證。',
 }
 
+const reportApiUrl = (import.meta.env.VITE_REPORT_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+
 const app = document.querySelector<HTMLDivElement>('#app')!
 
 app.innerHTML = `
@@ -204,6 +206,7 @@ const semanticToggle = document.querySelector<HTMLInputElement>('#semantic-toggl
 const semanticStatus = document.querySelector<HTMLElement>('#semantic-status')!
 const resultWrap = document.querySelector<HTMLElement>('#result-wrap')!
 let previewUrls: string[] = []
+let selectedImageFiles: File[] = []
 let ocrWorkerPromise: Promise<Worker> | null = null
 let ocrWorkerLanguageMode: 'full' | 'english' = 'full'
 let analysisContext: AnalysisContext = { source: 'text' }
@@ -233,6 +236,7 @@ function resetImageUpload() {
   imagePreview.hidden = true
   previewUrls.forEach((url) => URL.revokeObjectURL(url))
   previewUrls = []
+  selectedImageFiles = []
   imageThumbnails.replaceChildren()
   batchProgressPrefix = ''
   updateOcrProgress(0, '')
@@ -387,10 +391,12 @@ function renderResult(result: AnalysisResult) {
       ${communityPanel}
       ${semanticPanel}
       ${evidencePanel}
+      ${renderReportPanel(result)}
       <button type="button" class="reset-button" id="reset-button">檢查另一則內容</button>
     </div>`
   resultWrap.hidden = false
   resultWrap.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  bindReportForm(result)
   document.querySelector<HTMLButtonElement>('#reset-button')?.addEventListener('click', () => {
     input.value = ''
     analysisContext = { source: 'text' }
@@ -400,6 +406,89 @@ function renderResult(result: AnalysisResult) {
     resultWrap.hidden = true
     updateCounter()
     input.focus()
+  })
+}
+
+function renderReportPanel(result: AnalysisResult) {
+  const unavailable = reportApiUrl
+    ? ''
+    : '<p class="report-unavailable">回報後端尚未完成啟用；目前仍可使用本機檢查，但此頁不會送出資料。</p>'
+  return `<section class="report-panel">
+    <details>
+      <summary><span>這則內容值得補進案例庫？</span><strong>自願匿名回報</strong></summary>
+      <div class="report-body">
+        <p>只有按下「送出回報」才會上傳。請先刪除姓名、電話、地址、帳號等個資；回報會先由管理者審核，不會直接成為黑名單。</p>
+        ${unavailable}
+        <form id="report-form">
+          <label>資料類型
+            <select name="reportType" required>
+              <option value="chat_screenshot">聊天／簡訊</option>
+              <option value="social_post">社群貼文</option>
+              <option value="email">電子郵件</option>
+              <option value="suspicious_url">可疑網址</option>
+              <option value="call_transcript">通話內容</option>
+              <option value="other">其他</option>
+            </select>
+          </label>
+          <label>要提供審核的文字（可自行刪除個資）
+            <textarea name="reportText" maxlength="12000" required>${escapeHtml(input.value)}</textarea>
+          </label>
+          <label>補充說明（選填）
+            <textarea name="contextText" maxlength="6000" placeholder="例如：在哪個平台看到、對方要求做什麼。請勿填寫被害人個資。"></textarea>
+          </label>
+          ${selectedImageFiles.length ? `<label class="report-check attachment-consent"><input type="checkbox" name="attachmentConsent" /> <span>另外同意保存本次原始截圖供管理者審核（最多 3 張、每張 5 MB；目前已選 ${selectedImageFiles.length} 張）</span></label>` : ''}
+          <label class="report-check"><input type="checkbox" name="consentCaseStorage" required /> <span>我同意保存這次匿名案例，並了解可用送出後取得的撤回碼刪除。</span></label>
+          <label class="report-check"><input type="checkbox" name="sourceRightsConfirmed" required /> <span>我確認有權提供這份內容，且已盡量移除無關第三人的個資。</span></label>
+          <fieldset>
+            <legend>額外用途（全部選填，不影響案件審核）</legend>
+            <label class="report-check"><input type="checkbox" name="consentResearch" /> <span>同意用於去識別化的防詐研究與統計。</span></label>
+            <label class="report-check"><input type="checkbox" name="consentModelTraining" /> <span>同意用於改善偵測模型；未勾選就不會用於模型訓練。</span></label>
+          </fieldset>
+          <div class="report-actions">
+            <button type="submit" ${reportApiUrl ? '' : 'disabled'}>送出回報供人工審核</button>
+            <span id="report-status" role="status" aria-live="polite">本次檢查結果：${escapeHtml(result.state)}，證據分數 ${result.score}</span>
+          </div>
+        </form>
+      </div>
+    </details>
+  </section>`
+}
+
+function bindReportForm(result: AnalysisResult) {
+  const form = document.querySelector<HTMLFormElement>('#report-form')
+  const status = document.querySelector<HTMLElement>('#report-status')
+  if (!form || !status || !reportApiUrl) return
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!
+    const fields = new FormData(form)
+    const includeAttachments = fields.get('attachmentConsent') === 'on'
+    if (includeAttachments && selectedImageFiles.length > 3) {
+      status.textContent = '原始附件最多 3 張；請先回到上方只選取要提供的 3 張，再重新檢查。'
+      return
+    }
+    const payload = new FormData()
+    for (const key of ['reportType', 'reportText', 'contextText']) payload.set(key, String(fields.get(key) ?? ''))
+    payload.set('analysisState', result.state)
+    payload.set('analysisCategory', result.category)
+    payload.set('analysisScore', String(result.score))
+    for (const key of ['consentCaseStorage', 'consentResearch', 'consentModelTraining', 'sourceRightsConfirmed', 'attachmentConsent']) {
+      payload.set(key, String(fields.get(key) === 'on'))
+    }
+    payload.set('website', '')
+    if (includeAttachments) selectedImageFiles.forEach((file) => payload.append('attachments', file, file.name))
+    submit.disabled = true
+    status.textContent = '正在安全送出回報…'
+    try {
+      const response = await fetch(`${reportApiUrl}/api/reports`, { method: 'POST', body: payload })
+      const body = await response.json() as { ok?: boolean; reportId?: string; deletionToken?: string; error?: string; errors?: string[] }
+      if (!response.ok || !body.ok) throw new Error(body.errors?.join('、') || body.error || `HTTP ${response.status}`)
+      form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select').forEach((control) => { control.disabled = true })
+      status.innerHTML = `已送交人工審核。案件編號：<code>${escapeHtml(body.reportId ?? '')}</code><br>撤回碼：<code>${escapeHtml(body.deletionToken ?? '')}</code><br><strong>請立即另存這兩項資料；基於隱私，系統不會再次顯示撤回碼。</strong>`
+    } catch (error) {
+      submit.disabled = false
+      status.textContent = `回報未送出：${error instanceof Error ? error.message : '請稍後再試'}`
+    }
   })
 }
 
@@ -554,6 +643,7 @@ imageInput.addEventListener('change', async () => {
     return
   }
 
+  selectedImageFiles = selectedFiles
   renderImageThumbnails(selectedFiles)
   imagePreview.hidden = false
   fileName.textContent = ''

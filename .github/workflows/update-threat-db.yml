@@ -55,6 +55,8 @@ jobs:
 
       - name: Build production site
         run: npm run build
+        env:
+          VITE_REPORT_API_URL: ${{ vars.REPORT_API_URL }}
 
       - name: Detect database changes
         if: github.event_name != 'push'

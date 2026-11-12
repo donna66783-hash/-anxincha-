@@ -39,6 +39,7 @@ export interface CommunitySearchResult {
 }
 
 let databasePromise: Promise<CommunityDatabase> | undefined
+const reportApiUrl = (import.meta.env.VITE_REPORT_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 function databaseUrl() {
   return new URL('data/community-intelligence.json', document.baseURI).toString()
@@ -47,7 +48,23 @@ function databaseUrl() {
 async function loadDatabase() {
   databasePromise ??= fetch(databaseUrl()).then(async (response) => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return response.json() as Promise<CommunityDatabase>
+    const local = await response.json() as CommunityDatabase
+    if (!reportApiUrl) return local
+    try {
+      const remoteResponse = await fetch(`${reportApiUrl}/api/community-database`)
+      if (!remoteResponse.ok) return local
+      const remote = await remoteResponse.json() as CommunityDatabase
+      const records = [...new Map([...local.records, ...remote.records].map((record) => [record.id, record])).values()]
+      return {
+        ...local,
+        version: `${local.version} + 使用者核准庫 ${remote.version}`,
+        recordCount: records.length,
+        privacy: `${local.privacy} ${remote.privacy}`.trim(),
+        records,
+      }
+    } catch {
+      return local
+    }
   })
   return databasePromise
 }

@@ -8,14 +8,21 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "worker:check": "tsc -p worker/tsconfig.json",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "worker:migrate:local": "wrangler d1 migrations apply anxincha-reports --local",
+    "worker:migrate:remote": "wrangler d1 migrations apply anxincha-reports --remote",
     "data:update": "node scripts/update-threat-db.mjs",
     "data:verify": "node scripts/verify-threat-db.mjs",
-    "check": "npm run data:verify && npm test && npm run build"
+    "check": "npm run data:verify && npm test -- --pool=threads --maxWorkers=1 --fileParallelism=false && npm run worker:check && npm run build"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261112.1",
     "typescript": "^5.9.3",
     "vite": "^7.2.2",
-    "vitest": "^4.0.8"
+    "vitest": "^4.0.8",
+    "wrangler": "^4.161.0"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",

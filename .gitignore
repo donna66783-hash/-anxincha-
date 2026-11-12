@@ -3,3 +3,6 @@ dist/
 .vite/
 *.local
 *.log
+.dev.vars
+.wrangler/
+.wrangler-config/

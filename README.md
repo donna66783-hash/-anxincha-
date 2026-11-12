@@ -13,6 +13,8 @@ npm run dev
 
 終端機會顯示本機網址，通常是 `http://localhost:5173/`。
 
+使用者自願回報、管理後台與核准後資料庫更新的架構及啟用步驟，請見 [docs/REPORTING_BACKEND.md](docs/REPORTING_BACKEND.md)。後台建置後位於 `/admin.html`。
+
 ## 驗證
 
 ```powershell
@@ -60,7 +62,7 @@ npm run data:verify
 ## 尚未納入
 
 - 語音轉文字
-- 使用者回報與家人守護
+- 家人守護
 - Android 通知監聽
 - 可量化準確率測試集
 - 未經 Meta 與社團管理員授權的 Facebook 全社團自動抓取
