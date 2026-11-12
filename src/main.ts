@@ -4,6 +4,7 @@ import { analyzeContent, type AnalysisContext, type AnalysisResult, type Decisio
 import { searchCommunityDatabase, type CommunitySearchResult } from './community-db'
 import { searchSemanticSimilarity, type SemanticProgress, type SemanticSearchResult } from './semantic-analyzer'
 import { searchThreatDatabase, type DatabaseSearchResult } from './threat-db'
+import { reportApiUrl as configuredReportApiUrl } from './config'
 
 const examples = {
   police: '您好，我是檢察官。您的帳戶涉及洗錢，偵查不公開，不能告訴家人。請今天內把存款匯到監管帳戶配合調查。',
@@ -12,7 +13,7 @@ const examples = {
   database: '客服通知：請立刻登入 https://tobuyersepc24.com/57vgaqk 完成帳號驗證。',
 }
 
-const reportApiUrl = (import.meta.env.VITE_REPORT_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const reportApiUrl = configuredReportApiUrl()
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 

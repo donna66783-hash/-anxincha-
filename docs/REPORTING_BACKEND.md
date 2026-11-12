@@ -19,7 +19,7 @@ npx wrangler d1 create anxincha-reports
 npx wrangler r2 bucket create anxincha-report-files
 ```
 
-把 D1 指令回傳的 `database_id` 填入 `wrangler.toml`，取代 `REPLACE_WITH_D1_DATABASE_ID`，再執行：
+把 D1 指令回傳的 `database_id` 填入 `wrangler.toml`，再執行：
 
 ```powershell
 npm run worker:migrate:remote
@@ -29,7 +29,7 @@ npm run worker:deploy
 
 `ADMIN_TOKEN` 請使用密碼管理器產生至少 32 個隨機字元，不要寫進 Git、`.env`、網頁或對話紀錄。部署完成後會取得 Worker 網址，例如 `https://anxincha-report-api.<帳號>.workers.dev`。
 
-最後到 GitHub repository：
+正式 API 網址已設為 `src/config.ts` 的安全公開設定；若日後要改用自訂網域，也可以在 GitHub repository 設定覆寫值：
 
 1. `Settings` → `Secrets and variables` → `Actions` → `Variables`。
 2. 新增 repository variable：名稱 `REPORT_API_URL`，值為 Worker 網址（結尾不加 `/`）。

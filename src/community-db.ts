@@ -1,3 +1,5 @@
+import { reportApiUrl as configuredReportApiUrl } from './config'
+
 export interface CommunitySignal {
   pattern: string
   title: string
@@ -39,7 +41,7 @@ export interface CommunitySearchResult {
 }
 
 let databasePromise: Promise<CommunityDatabase> | undefined
-const reportApiUrl = (import.meta.env.VITE_REPORT_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const reportApiUrl = configuredReportApiUrl()
 
 function databaseUrl() {
   return new URL('data/community-intelligence.json', document.baseURI).toString()

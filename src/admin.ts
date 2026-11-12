@@ -1,4 +1,5 @@
 import './admin.css'
+import { reportApiUrl } from './config'
 
 interface AttachmentItem {
   id: string
@@ -24,7 +25,7 @@ interface ReportItem {
   attachments: AttachmentItem[]
 }
 
-const configuredApiUrl = (import.meta.env.VITE_REPORT_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const configuredApiUrl = reportApiUrl()
 const app = document.querySelector<HTMLElement>('#admin-app')!
 app.innerHTML = `
   <header class="admin-header"><h1>安心查案例審核後台</h1><p>查看自願回報、檢查去識別化內容，核准後才會更新公開比對庫。</p></header>

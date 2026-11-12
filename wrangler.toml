@@ -8,7 +8,7 @@ ALLOWED_ORIGIN = "https://donna66783-hash.github.io"
 [[d1_databases]]
 binding = "DB"
 database_name = "anxincha-reports"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "9d0d45d1-2b35-4833-ae54-e5b2f32e4e47"
 migrations_dir = "worker/migrations"
 
 [[r2_buckets]]
