@@ -117,17 +117,32 @@ async function download(source) {
 
 const domainIndex = new Map()
 const sourceCounts = {}
+const sourceContentUpdatedAt = {}
+const sourceDownloadedAt = {}
 
 for (const source of sources) {
   const rows = await download(source)
   sourceCounts[source.id] = rows.length
+  sourceDownloadedAt[source.id] = new Date().toISOString()
 
   if (source.id === 1) {
-    for (const row of rows) addRecord(domainIndex, row['網域名稱'] || row['偽冒網址'], source.id, row['一頁式數位經濟詐騙網站'], normalizeDate(row['接獲通報日期']))
+    for (const row of rows) {
+      const date = normalizeDate(row['接獲通報日期'])
+      addRecord(domainIndex, row['網域名稱'] || row['偽冒網址'], source.id, row['一頁式數位經濟詐騙網站'], date)
+      if (date > (sourceContentUpdatedAt[source.id] ?? '')) sourceContentUpdatedAt[source.id] = date
+    }
   } else if (source.id === 2) {
-    for (const row of rows) addRecord(domainIndex, row['網域'], source.id, row['網站性質'], normalizeDate(row['民國年月'], true))
+    for (const row of rows) {
+      const date = normalizeDate(row['民國年月'], true)
+      addRecord(domainIndex, row['網域'], source.id, row['網站性質'], date)
+      if (date > (sourceContentUpdatedAt[source.id] ?? '')) sourceContentUpdatedAt[source.id] = date
+    }
   } else {
-    for (const row of rows) addRecord(domainIndex, row['網址'], source.id, '假投資／博弈', normalizeDate(row['統計結束日期']))
+    for (const row of rows) {
+      const date = normalizeDate(row['統計結束日期'])
+      addRecord(domainIndex, row['網址'], source.id, '假投資／博弈', date)
+      if (date > (sourceContentUpdatedAt[source.id] ?? '')) sourceContentUpdatedAt[source.id] = date
+    }
   }
 }
 
@@ -147,6 +162,8 @@ const database = {
   schemaVersion: 1,
   version,
   generatedAt,
+  lastSuccessfulDownloadAt: generatedAt,
+  lastVerifiedAt: generatedAt,
   recordCount: records.length,
   categories: {
     investment: '假投資／金融／博弈',
@@ -161,6 +178,10 @@ const database = {
     datasetUrl,
     license: '政府資料開放授權條款－第 1 版',
     importedRows: sourceCounts[id],
+    metadataUpdatedAt: '未知',
+    contentUpdatedAt: sourceContentUpdatedAt[id] || '未知',
+    downloadedAt: sourceDownloadedAt[id],
+    verifiedAt: generatedAt,
   })),
   records,
 }
@@ -177,12 +198,18 @@ try {
 
 function comparableDatabase(value) {
   if (!value || typeof value !== 'object') return ''
-  const { version: _version, generatedAt: _generatedAt, ...content } = value
-  return JSON.stringify(content)
+  const { version: _version, generatedAt: _generatedAt, lastSuccessfulDownloadAt: _downloaded, lastVerifiedAt: _verified, ...content } = value
+  return JSON.stringify({
+    ...content,
+    sources: content.sources?.map(({ downloadedAt: _sourceDownloaded, verifiedAt: _sourceVerified, ...source }) => source),
+  })
 }
 
 if (comparableDatabase(existingDatabase) === comparableDatabase(database)) {
-  console.log(`特徵庫內容沒有變更：保留 ${existingDatabase.version} 版本，共 ${records.length.toLocaleString('zh-TW')} 個網域`)
+  database.version = existingDatabase.version
+  database.generatedAt = existingDatabase.generatedAt
+  await writeFile(outputPath, JSON.stringify(database), 'utf8')
+  console.log(`特徵庫內容沒有變更：保留 ${existingDatabase.version} 版本，更新下載與確認時間，共 ${records.length.toLocaleString('zh-TW')} 個網域`)
   process.exit(0)
 }
 

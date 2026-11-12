@@ -4,14 +4,20 @@ export interface ThreatSource {
   datasetUrl: string
   license: string
   importedRows: number
+  metadataUpdatedAt?: string
+  contentUpdatedAt?: string
+  downloadedAt?: string
+  verifiedAt?: string
 }
 
 type ThreatRecord = [domain: string, sourceMask: number, categories: string, lastSeen: string]
 
-interface ThreatDatabase {
+export interface ThreatDatabase {
   schemaVersion: number
   version: string
   generatedAt: string
+  lastSuccessfulDownloadAt?: string
+  lastVerifiedAt?: string
   recordCount: number
   categories: Record<string, string>
   sources: ThreatSource[]
@@ -21,6 +27,8 @@ interface ThreatDatabase {
 export interface DatabaseMatch {
   domain: string
   inputDomain: string
+  originalInput?: string
+  matchType?: 'exact-hostname' | 'parent-domain'
   category: string
   lastSeen: string
   sources: ThreatSource[]
@@ -32,17 +40,30 @@ export interface DatabaseSearchResult {
   status: DatabaseStatus
   matches: DatabaseMatch[]
   searchedDomains: string[]
+  searchedInputs?: Array<{ original: string; normalized: string }>
   version?: string
   recordCount?: number
   generatedAt?: string
+  lastSuccessfulDownloadAt?: string
+  lastVerifiedAt?: string
   sources?: ThreatSource[]
   error?: string
 }
 
 let databasePromise: Promise<ThreatDatabase> | undefined
 
-function normalizeDomain(value: string) {
-  let candidate = value.trim().toLowerCase().replace(/[，。！？、；：）】》〉\]}>,!?;:'"]+$/g, '')
+const sharedPlatformRoots = new Set([
+  'bit.ly', 'docs.google.com', 'drive.google.com', 'facebook.com', 'forms.gle',
+  'instagram.com', 'line.me', 'linktr.ee', 'm.facebook.com', 't.co',
+  'threads.net', 'tinyurl.com',
+])
+
+const sharedHostingSuffixes = ['github.io', 'notion.site']
+
+export function normalizeDomain(value: string) {
+  let candidate = value.trim().toLowerCase()
+    .replace(/[。．｡]/g, '.')
+    .replace(/[，！？、；：）】》〉\]}>,!?;:'"]+$/g, '')
   try {
     const url = new URL(candidate.includes('://') ? candidate : `https://${candidate}`)
     candidate = url.hostname
@@ -52,12 +73,22 @@ function normalizeDomain(value: string) {
   return candidate.replace(/^www\./, '').replace(/\.$/, '')
 }
 
+export function extractDomainInputs(content: string) {
+  const matches = content.match(/(?:https?:\/\/)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?[.。．｡])+[\p{L}\p{N}-]{2,63}(?:\/[^\s<>"']*)?/giu) ?? []
+  const unique = new Map<string, { original: string; normalized: string }>()
+  matches.forEach((original) => {
+    const normalized = normalizeDomain(original)
+    if (normalized.includes('.') && !unique.has(normalized)) unique.set(normalized, { original, normalized })
+  })
+  return [...unique.values()]
+}
+
 export function extractDomains(content: string) {
-  const matches = content.match(/(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:\/[^\s<>"']*)?/gi) ?? []
-  return [...new Set(matches.map(normalizeDomain).filter((domain) => domain.includes('.')))]
+  return extractDomainInputs(content).map(({ normalized }) => normalized)
 }
 
 function candidateDomains(domain: string) {
+  if (sharedPlatformRoots.has(domain) || sharedHostingSuffixes.some((suffix) => domain === suffix || domain.endsWith(`.${suffix}`))) return [domain]
   const labels = domain.split('.')
   const candidates = [domain]
   for (let index = 1; index < labels.length - 1; index += 1) candidates.push(labels.slice(index).join('.'))
@@ -65,7 +96,9 @@ function candidateDomains(domain: string) {
 }
 
 function buildMatch(
+  originalInput: string,
   inputDomain: string,
+  matchType: DatabaseMatch['matchType'],
   record: ThreatRecord,
   database: Pick<ThreatDatabase, 'categories' | 'sources'>,
 ): DatabaseMatch {
@@ -74,6 +107,8 @@ function buildMatch(
   return {
     domain,
     inputDomain,
+    originalInput,
+    matchType,
     category: categories.join('、') || '已知涉詐網站',
     lastSeen,
     sources: database.sources.filter((source) => (sourceMask & source.id) !== 0),
@@ -82,18 +117,21 @@ function buildMatch(
 
 export function searchRecords(
   content: string,
-  database: Pick<ThreatDatabase, 'version' | 'recordCount' | 'categories' | 'sources' | 'records'> & Partial<Pick<ThreatDatabase, 'generatedAt'>>,
+  database: Pick<ThreatDatabase, 'version' | 'recordCount' | 'categories' | 'sources' | 'records'> & Partial<Pick<ThreatDatabase, 'generatedAt' | 'lastSuccessfulDownloadAt' | 'lastVerifiedAt'>>,
 ): DatabaseSearchResult {
-  const searchedDomains = extractDomains(content)
+  const searchedInputs = extractDomainInputs(content)
+  const searchedDomains = searchedInputs.map(({ normalized }) => normalized)
   if (!searchedDomains.length) {
-    return { status: 'no-domain', matches: [], searchedDomains, version: database.version, recordCount: database.recordCount, generatedAt: database.generatedAt, sources: database.sources }
+    return { status: 'no-domain', matches: [], searchedDomains, searchedInputs, version: database.version, recordCount: database.recordCount, generatedAt: database.generatedAt, lastSuccessfulDownloadAt: database.lastSuccessfulDownloadAt, lastVerifiedAt: database.lastVerifiedAt, sources: database.sources }
   }
 
   const index = new Map(database.records.map((record) => [record[0], record]))
-  const matches = searchedDomains.flatMap((inputDomain) => {
+  const matches = searchedInputs.flatMap(({ original, normalized: inputDomain }) => {
     for (const candidate of candidateDomains(inputDomain)) {
       const record = index.get(candidate)
-      if (record) return [buildMatch(inputDomain, record, database)]
+      if (record && !sharedPlatformRoots.has(record[0])) {
+        return [buildMatch(original, inputDomain, candidate === inputDomain ? 'exact-hostname' : 'parent-domain', record, database)]
+      }
     }
     return []
   })
@@ -102,9 +140,12 @@ export function searchRecords(
     status: matches.length ? 'matched' : 'not-matched',
     matches,
     searchedDomains,
+    searchedInputs,
     version: database.version,
     recordCount: database.recordCount,
     generatedAt: database.generatedAt,
+    lastSuccessfulDownloadAt: database.lastSuccessfulDownloadAt,
+    lastVerifiedAt: database.lastVerifiedAt,
     sources: database.sources,
   }
 }

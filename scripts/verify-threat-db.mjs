@@ -13,6 +13,9 @@ function requireCondition(condition, message) {
 
 requireCondition(database.schemaVersion === 1, 'schemaVersion 必須是 1')
 requireCondition(/^\d{4}-\d{2}-\d{2}$/.test(database.version), 'version 必須是 YYYY-MM-DD')
+requireCondition(!Number.isNaN(Date.parse(database.generatedAt)), 'generatedAt 必須是有效時間')
+requireCondition(!Number.isNaN(Date.parse(database.lastSuccessfulDownloadAt)), 'lastSuccessfulDownloadAt 必須是有效時間')
+requireCondition(!Number.isNaN(Date.parse(database.lastVerifiedAt)), 'lastVerifiedAt 必須是有效時間')
 requireCondition(Array.isArray(database.records), 'records 必須是陣列')
 requireCondition(database.recordCount === database.records?.length, 'recordCount 與實際筆數不一致')
 requireCondition(database.recordCount >= 100_000, '網域總數異常少於 100,000，拒絕發布')
@@ -24,6 +27,10 @@ for (const source of database.sources ?? []) {
   requireCondition(minimumRows !== undefined, `未知的來源 ID：${source.id}`)
   if (minimumRows !== undefined) requireCondition(source.importedRows >= minimumRows, `${source.name} 匯入筆數異常少於 ${minimumRows}`)
   requireCondition(source.license === '政府資料開放授權條款－第 1 版', `${source.name} 授權標示不符`)
+  requireCondition(typeof source.metadataUpdatedAt === 'string' && source.metadataUpdatedAt.length > 0, `${source.name} 缺少官方詮釋資料更新時間或未知標示`)
+  requireCondition(source.contentUpdatedAt === '未知' || /^\d{6}(?:\d{2})?$/.test(source.contentUpdatedAt), `${source.name} 來源內容版本格式不符`)
+  requireCondition(!Number.isNaN(Date.parse(source.downloadedAt)), `${source.name} 下載時間無效`)
+  requireCondition(!Number.isNaN(Date.parse(source.verifiedAt)), `${source.name} 確認時間無效`)
 }
 
 let previousDomain = ''

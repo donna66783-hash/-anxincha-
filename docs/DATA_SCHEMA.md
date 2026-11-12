@@ -2,6 +2,17 @@
 
 狀態：設計基線；尚未代表所有來源已接入。
 
+## 現行政府網域快照欄位
+
+`public/data/threat-intelligence.json` 另保留：
+
+- 快照：`version`, `generatedAt`, `lastSuccessfulDownloadAt`, `lastVerifiedAt`, `recordCount`。
+- 來源：`metadataUpdatedAt`, `contentUpdatedAt`, `downloadedAt`, `verifiedAt`, `license`, `importedRows`。
+- 個別網域：`domain`, `sourceMask`, `categories`, `lastSeen`。
+- 查詢結果（執行期）：`originalInput`, `inputDomain`, `matchType=exact-hostname|parent-domain`。
+
+`lastSeen` 是來源中的記錄日期，不是目前仍有效的證明。官方未提供的時間欄位使用「未知」，不得以下載時間冒充內容版本。所有網域測試只以純文字比對，查詢程式不連線目標網域。
+
 ## L0 `sources`
 
 必要欄位：`source_id`, `name`, `origin_url`, `publisher`, `jurisdiction`, `language[]`, `modality[]`, `source_kind`, `update_cadence`, `last_checked_at`, `retrieved_at`, `source_version`, `source_hash`, `terms_url`, `license_name`, `license_url`, `commercial_use_allowed`, `redistribution_allowed`, `derivatives_allowed`, `training_allowed`, `personal_data_risk`, `verification_notes`, `reviewed_by`, `approval_status`。

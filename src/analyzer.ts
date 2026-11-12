@@ -221,12 +221,16 @@ export function analyzeContent(
   semantic: SemanticSearchResult = emptySemanticResult,
 ): AnalysisResult {
   const text = normalizeForMatching(content.trim())
-  const matchedRules = rules.filter((rule) => rule.pattern.test(text))
+  const educationalWarning = /(?:防詐|反詐|165).{0,80}(?:不要|切勿|請勿|避免)/i.test(text)
+  const directRiskInstruction = /(?:請|要求|務必|必須|為了.{0,8}(?:安全|防詐)).{0,18}(?:匯款|轉帳|提供.{0,6}驗證碼|操作ATM|加.{0,6}LINE)/i.test(text)
+  const matchedRules = educationalWarning && !directRiskInstruction
+    ? []
+    : rules.filter((rule) => rule.pattern.test(text))
   const findings: Finding[] = matchedRules.map(({ title, detail, weight }) => ({ title, detail, weight }))
   findings.push(...inspectUrl(text))
   findings.push(...database.matches.slice(0, 3).map((match) => ({
-    title: `政府開放資料命中：${match.domain}`,
-    detail: `此網域出現在${match.sources.map((source) => source.name).join('、')}。資料類型：${match.category}${match.lastSeen ? `；資料日期：${match.lastSeen}` : ''}。`,
+    title: `政府歷史紀錄命中：${match.domain}`,
+    detail: `此網域曾出現在${match.sources.map((source) => source.name).join('、')}。資料類型：${match.category}${match.lastSeen ? `；來源記錄日期：${match.lastSeen}` : '；來源記錄日期未知'}。這是歷史紀錄，不代表目前仍由詐騙者使用。`,
     weight: 85,
   })))
   findings.push(...community.matches.slice(0, 3).flatMap((match) => match.matchedSignals.map((signal, index) => ({
@@ -253,7 +257,7 @@ export function analyzeContent(
     && (Boolean(context.ocrFailure)
       || (context.ocrCompletedCount ?? 1) === 0
       || (context.ocrConfidence ?? 0) < 60
-      || findings.length === 0)
+      || ((context.ocrTextLength ?? text.length) < 20 && !findings.some((finding) => finding.weight > 0)))
 
   if (context.source === 'image' && context.ocrFailure) {
     findings.push({
@@ -273,7 +277,7 @@ export function analyzeContent(
       detail: `共有 ${context.imageCount ?? 0} 張截圖，其中 ${context.ocrFailedCount} 張未能讀取；目前結果只根據成功辨識的內容，請另外補傳失敗的截圖。`,
       weight: 0,
     })
-  } else if (context.source === 'image' && findings.length === 0) {
+  } else if (context.source === 'image' && (context.ocrTextLength ?? text.length) < 20 && !findings.some((finding) => finding.weight > 0)) {
     findings.push({
       title: '截圖未提供足夠資訊確認安全',
       detail: '圖片辨識可能遺漏關鍵內容；沒有網址或沒有命中案例，不代表對方可信。',
@@ -306,7 +310,7 @@ export function analyzeContent(
 
   const summaries: Record<DecisionState, string> = {
     HIGH_RISK: database.matches.length
-      ? '訊息中的網址已出現在政府公開涉詐資料，請勿開啟、登入或付款。'
+      ? '訊息中的網域曾出現在官方涉詐停止解析資料；紀錄可能為歷史狀態，請先透過官方管道確認目前狀態。'
       : community.matches.length
         ? '內容與已知社群詐騙案例的多項話術特徵相符，請停止提供資料或加入陌生群組。'
       : '出現多項高風險警訊，請先停止互動與付款。',

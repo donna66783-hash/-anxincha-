@@ -38,7 +38,9 @@ describe('analyzeContent', () => {
     })
     expect(result.level).toBe('high')
     expect(result.score).toBeGreaterThanOrEqual(85)
-    expect(result.summary).toContain('政府公開涉詐資料')
+    expect(result.summary).toContain('曾出現在官方')
+    expect(result.summary).toContain('歷史狀態')
+    expect(result.findings[0]?.detail).toContain('不代表目前仍由詐騙者使用')
   })
 
   it('treats a multi-signal community case match as high risk without a URL', () => {
@@ -85,10 +87,17 @@ describe('analyzeContent', () => {
   })
 
   it('uses a cautious result for an otherwise unmatched screenshot', () => {
-    const result = analyzeContent('明天下午三點見面', undefined, undefined, { source: 'image', ocrConfidence: 91 })
+    const result = analyzeContent('明天下午三點見面', undefined, undefined, { source: 'image', ocrConfidence: 91, ocrTextLength: 8 })
     expect(result.level).toBe('medium')
     expect(result.state).toBe('INSUFFICIENT_EVIDENCE')
     expect(result.findings.some((finding) => finding.title.includes('足夠資訊'))).toBe(true)
+  })
+
+  it('returns no known signals when OCR is reliable and the visible text is sufficient', () => {
+    const text = '媽媽，我晚上六點到家，回去前會先到市場買水果，需要幫妳帶什麼嗎？'
+    const result = analyzeContent(text, undefined, undefined, { source: 'image', ocrConfidence: 92, ocrTextLength: text.length })
+    expect(result.state).toBe('NO_KNOWN_SIGNALS')
+    expect(result.level).toBe('low')
   })
 
   it('returns insufficient evidence when screenshot OCR fails', () => {
@@ -169,5 +178,17 @@ describe('analyzeContent', () => {
   it('does not flag a normal job-page announcement without private contact diversion', () => {
     const result = analyzeContent('本公司公開招募應用工程師，職務內容與投遞方式請查看 https://careers.example.com/jobs/123。')
     expect(result.level).toBe('low')
+  })
+
+  it('does not treat ordinary anti-scam education as a scam instruction', () => {
+    const result = analyzeContent('165 防詐宣導：切勿匯款、轉帳或提供驗證碼，也不要點擊陌生連結。')
+    expect(result.state).toBe('NO_KNOWN_SIGNALS')
+    expect(result.score).toBe(0)
+  })
+
+  it('still flags scammers who impersonate anti-scam protection to demand action', () => {
+    const result = analyzeContent('為了防詐安全驗證，請立即匯款到監管帳戶，並提供驗證碼。')
+    expect(result.state).toBe('HIGH_RISK')
+    expect(result.findings.some((finding) => finding.title.includes('驗證碼') || finding.title.includes('敏感資料'))).toBe(true)
   })
 })
