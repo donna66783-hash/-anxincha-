@@ -13,9 +13,11 @@
 ### 驗證與限制
 
 - 政府快照 127,687 個網域；7 個測試檔共 60 項通過，Worker 型別檢查與 production build 通過。
+- 正式 GitHub Pages 以 390×844 viewport 上傳 1080×2400 Messenger 私有測試圖：OCR 81%、3 候選一致、3.3 秒；原圖為 `SUSPICIOUS` 44，人工修正為 48，恢復後回到 44，單張補充背景後為 `HIGH_RISK` 99。
+- 正式站另測 104×225 模糊縮圖，沒有可靠候選時輸出 `INSUFFICIENT_EVIDENCE` 0、完整度 low，未虛構文字。
 - 實際盤點 13 張相關私人截圖，包含 8 張 104×225 縮圖；0 張具公開再散布授權，未提交 GitHub。
 - 少於 30 張且低解析度圖缺可靠逐字真實標籤，不宣稱正式準確率。
-- 中低階 Android 實機效能仍待 UAT；詳見 `FIRST_BATCH_1B_ACCEPTANCE.md`。
+- 手機響應式與私有檔案選擇器已驗收；中低階 Android 實機 CPU／峰值記憶體／十張完整時間仍待 UAT。詳見 `FIRST_BATCH_1B_ACCEPTANCE.md`。
 
 ## 2026-11-13｜第一批 1A：政府歷史資料與多圖獨立分析
 
